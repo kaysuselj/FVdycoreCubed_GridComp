@@ -2037,11 +2037,21 @@ end subroutine FV_Run
   character(len=ESMF_MAXSTR)       :: tracerName
   character(len=*), parameter      :: AdjCO2Suffix = 'CO2_ADJ'
   logical                          :: foundAdjCO2
+   logical, save                    :: printedTracerNames = .FALSE.
   type (ESMF_VM)                   :: VM
 
   AdjLocalSum = 0.0_ESMF_KIND_R8
   AdjGlobalSum = 0.0_ESMF_KIND_R8
   foundAdjCO2 = .FALSE.
+
+  if (.not. printedTracerNames .and. mpp_pe() == mpp_root_pe()) then
+     write(*,*) 'ADJ_CO2_SUM tracer list begin'
+     do N = 1, STATE%GRID%NQ
+        write(*,*) 'ADJ_CO2_SUM tracer', N, trim(STATE%VARS%TRACER(N)%TNAME)
+     enddo
+     write(*,*) 'ADJ_CO2_SUM tracer list end'
+     printedTracerNames = .TRUE.
+  endif
 
   do N = 1, STATE%GRID%NQ
      tracerName = trim(STATE%VARS%TRACER(N)%TNAME)
