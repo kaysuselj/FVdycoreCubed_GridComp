@@ -1562,6 +1562,9 @@ subroutine FV_Run (STATE, CLOCK, GC, RC)
 
     elapsed_time = elapsed_time + myDT
 
+   call Log_AdjCO2_Dynamics_Sum(STATE, 'before_dynamics', RC=STATUS)
+   VERIFY_(STATUS)
+
     if (DEBUG) call debug_fv_state('Before Dynamics Execution',STATE)
 
 ! Update FV with Internal State
@@ -1588,9 +1591,72 @@ subroutine FV_Run (STATE, CLOCK, GC, RC)
           FV_Atm(1)%flagstruct%Make_NH=.false. 
         endif
       endif
+       call Log_AdjCO2_Dynamics_Sum(STATE, 'after_dynamics', RC=STATUS)
+       VERIFY_(STATUS)
+
      ! Mark FV setup complete
       fv_first_run = .false.
     endif
+
+   subroutine Log_AdjCO2_Dynamics_Sum(STATE, Label, RC)
+
+     type (T_FVDYCORE_STATE), pointer              :: STATE
+     character(len=*),               intent(IN   ) :: Label
+     integer, optional,              intent(OUT  ) :: RC
+
+     integer                          :: STATUS
+     integer                          :: N
+     integer                          :: nameLength
+     integer                          :: suffixStart
+     real(ESMF_KIND_R8)               :: AdjLocalSum
+     real(ESMF_KIND_R8)               :: AdjGlobalSum
+     character(len=ESMF_MAXSTR)       :: tracerName
+     character(len=*), parameter      :: AdjCO2Suffix = 'CO2_ADJ'
+     logical                          :: foundAdjCO2
+     type (ESMF_VM)                   :: VM
+
+     AdjLocalSum = 0.0_ESMF_KIND_R8
+     AdjGlobalSum = 0.0_ESMF_KIND_R8
+     foundAdjCO2 = .FALSE.
+
+     do N = 1, STATE%GRID%NQ
+        tracerName = trim(STATE%VARS%TRACER(N)%TNAME)
+        nameLength = len_trim(tracerName)
+        suffixStart = nameLength - len_trim(AdjCO2Suffix) + 1
+
+        if (suffixStart < 1) cycle
+        if (tracerName(suffixStart:nameLength) /= AdjCO2Suffix) cycle
+
+        foundAdjCO2 = .TRUE.
+        if (STATE%VARS%TRACER(N)%IS_R4) then
+           if (associated(STATE%VARS%TRACER(N)%content_r4)) then
+              AdjLocalSum = AdjLocalSum + sum(real(STATE%VARS%TRACER(N)%content_r4(:,:,:), ESMF_KIND_R8))
+           endif
+        else
+           if (associated(STATE%VARS%TRACER(N)%content)) then
+              AdjLocalSum = AdjLocalSum + sum(real(STATE%VARS%TRACER(N)%content(:,:,:), ESMF_KIND_R8))
+           endif
+        endif
+     enddo
+
+     if (.not. foundAdjCO2) then
+        RETURN_(ESMF_SUCCESS)
+     endif
+
+     call ESMF_VMGetCurrent(VM, rc=STATUS)
+     VERIFY_(STATUS)
+
+     call MAPL_CommsAllReduceSum(VM, sendbuf=AdjLocalSum, recvbuf=AdjGlobalSum, &
+                                 count=1, rc=STATUS)
+     VERIFY_(STATUS)
+
+     if (mpp_pe() == mpp_root_pe()) then
+        write(*,*) 'ADJ_CO2_SUM [' // trim(Label) // '] sum=', AdjGlobalSum
+     endif
+
+     RETURN_(ESMF_SUCCESS)
+
+   end subroutine Log_AdjCO2_Dynamics_Sum
 
 ! Check Dry Mass (Apply fixer is option is enabled)
    if ( check_mass .OR. fix_mass ) then
