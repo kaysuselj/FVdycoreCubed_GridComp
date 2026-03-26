@@ -2044,6 +2044,10 @@ end subroutine FV_Run
   AdjGlobalSum = 0.0_ESMF_KIND_R8
   foundAdjCO2 = .FALSE.
 
+  if (mpp_pe() == mpp_root_pe()) then
+     write(*,*) 'ADJ_CO2_SUM entering ', trim(Label), ' NQ=', STATE%GRID%NQ
+  endif
+
   if (.not. printedTracerNames .and. mpp_pe() == mpp_root_pe()) then
      write(*,*) 'ADJ_CO2_SUM tracer list begin'
      do N = 1, STATE%GRID%NQ
