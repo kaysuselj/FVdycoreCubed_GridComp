@@ -2028,6 +2028,7 @@ end subroutine FV_Run
   integer, optional,              intent(OUT  ) :: RC
 
   integer                          :: STATUS
+   character(len=ESMF_MAXSTR)      :: IAm='FV:Log_AdjCO2_Dynamics_Sum'
   integer                          :: N
   integer                          :: nameLength
   integer                          :: suffixStart
@@ -2069,8 +2070,8 @@ end subroutine FV_Run
   call ESMF_VMGetCurrent(VM, rc=STATUS)
   VERIFY_(STATUS)
 
-  call MAPL_CommsAllReduceSum(VM, sendbuf=AdjLocalSum, recvbuf=AdjGlobalSum, &
-                              count=1, rc=STATUS)
+   call MAPL_CommsAllReduceSum(VM, sendbuf=AdjLocalSum, recvbuf=AdjGlobalSum, &
+                                             cnt=1, rc=STATUS)
   VERIFY_(STATUS)
 
   if (mpp_pe() == mpp_root_pe()) then
