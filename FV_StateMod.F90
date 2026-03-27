@@ -1117,6 +1117,7 @@ subroutine FV_Run (STATE, CLOCK, GC, RC)
   real(FVPRC), allocatable :: mass(:,:), tqtot(:,:)
   real(REAL8), allocatable :: ratio(:)
   real(REAL8) :: dpd
+   real(REAL8) :: uMin, uMax, vMin, vMax
   real(FVPRC) :: FQC
 
 ! Splitting for Pure Advection
@@ -1710,6 +1711,14 @@ subroutine FV_Run (STATE, CLOCK, GC, RC)
 
     call MAPL_TimerOn(MAPL,"--FV_DYNAMICS")
     if (.not. FV_OFF) then
+   if (mpp_pe() == mpp_root_pe()) then
+      uMin = minval(FV_Atm(1)%u(isc:iec,jsc:jec,1:npz))
+      uMax = maxval(FV_Atm(1)%u(isc:iec,jsc:jec,1:npz))
+      vMin = minval(FV_Atm(1)%v(isc:iec,jsc:jec,1:npz))
+      vMax = maxval(FV_Atm(1)%v(isc:iec,jsc:jec,1:npz))
+      write(*,*) 'ADJ_CO2_SUM DYN_INPUT dt=', myDT, ' umin=', uMin, ' umax=', uMax, &
+              ' vmin=', vMin, ' vmax=', vMax
+   endif
     call set_domain(FV_Atm(1)%domain)  ! needed for diagnostic output done in fv_dynamics
     call fv_dynamics(FV_Atm(1)%npx, FV_Atm(1)%npy, FV_Atm(1)%npz, FV_Atm(1)%ncnst, FV_Atm(1)%ng,   &
                      myDT, FV_Atm(1)%flagstruct%consv_te, FV_Atm(1)%flagstruct%fill, FV_Atm(1)%flagstruct%reproduce_sum, kappa,   &
