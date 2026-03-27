@@ -639,6 +639,8 @@ contains
       integer                             :: nqt
       logical                             :: tend
       logical                             :: exclude
+      real(FVPRC)                         :: mfxMin, mfxMax, mfyMin, mfyMax
+      real(FVPRC)                         :: cxMin, cxMax, cyMin, cyMax
       character(len=ESMF_MAXSTR)          :: tmpstring
       character(len=ESMF_MAXSTR)          :: adjustTracerMode
       character(len=ESMF_MAXSTR), allocatable :: xlist(:)
@@ -1019,6 +1021,20 @@ contains
 #else
          if (AdvCore_Advection>0) then
 #endif
+
+            if (MAPL_Am_I_Root()) then
+               mfxMin = minval(MFX)
+               mfxMax = maxval(MFX)
+               mfyMin = minval(MFY)
+               mfyMax = maxval(MFY)
+               cxMin  = minval(CX)
+               cxMax  = maxval(CX)
+               cyMin  = minval(CY)
+               cyMax  = maxval(CY)
+               write(*,*) 'ADVCORE_INPUT dt=', dt, ' mfxmin=', mfxMin, ' mfxmax=', mfxMax, &
+                          ' mfymin=', mfyMin, ' mfymax=', mfyMax, ' cxmin=', cxMin,        &
+                          ' cxmax=', cxMax, ' cymin=', cyMin, ' cymax=', cyMax
+            endif
 
             ! Run offline advection
             if ( Use_Total_Air_Pressure > 0 ) then
