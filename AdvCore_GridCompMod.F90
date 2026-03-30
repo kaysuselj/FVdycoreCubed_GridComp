@@ -244,7 +244,7 @@ contains
          VLOCATION  = MAPL_VLocationCenter,           RC=STATUS  )
     VERIFY_(STATUS)
 
-   #ifdef ADJOINT
+#ifdef ADJOINT
        call MAPL_AddImportSpec ( gc,                                  &
           SHORT_NAME = 'ADV_AIRDEN',                                &
           LONG_NAME  = 'dry_air_density_for_advection',             &
@@ -253,7 +253,7 @@ contains
           DIMS       = MAPL_DimsHorzVert,                           &
           VLOCATION  = MAPL_VLocationCenter,           RC=STATUS  )
        VERIFY_(STATUS)
-   #endif
+#endif
 
   !EXPORT STATE:
      call MAPL_AddExportSpec ( gc,                                  &
@@ -617,9 +617,9 @@ contains
       REAL(REAL8), POINTER, DIMENSION(:,:,:)   :: iDryPLE0 ! GCHP dry
       REAL(REAL8), POINTER, DIMENSION(:,:,:)   :: iDryPLE1 ! GCHP dry
       REAL(REAL8), POINTER, DIMENSION(:,:,:)   :: iSPHU0   ! GCHP total
-   #ifdef ADJOINT
+#ifdef ADJOINT
       REAL(REAL8), POINTER, DIMENSION(:,:,:)   :: iAIRDEN  ! dry air density
-   #endif
+#endif
 
 ! Exports
       REAL(REAL8), POINTER, DIMENSION(:,:,:)   :: ePLE     ! GCHP
@@ -637,9 +637,9 @@ contains
       REAL(FVPRC), POINTER, DIMENSION(:,:,:)   :: DryPLE1 ! GCHP dry
       REAL(FVPRC), POINTER, DIMENSION(:,:,:)   :: PLEAdv  ! GCHP total
       REAL(FVPRC), POINTER, DIMENSION(:,:,:)   :: SPHU0   ! GCHP total
-   #ifdef ADJOINT
+#ifdef ADJOINT
       REAL(FVPRC), POINTER, DIMENSION(:,:,:)   :: AIRDEN => NULL() ! selected air density
-   #endif
+#endif
       REAL(FVPRC), POINTER, DIMENSION(:)       :: AK
       REAL(FVPRC), POINTER, DIMENSION(:)       :: BK
       REAL(REAL8), allocatable :: ak_r8(:),bk_r8(:)
