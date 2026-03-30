@@ -1179,15 +1179,7 @@ contains
                                              PLEAdv )
             endif
 
-#ifdef ADJOINT
-            if (isAdjoint) then
-               do N=1,NAdv
-                  where (AIRDEN > 0.0_FVPRC)
-                     TRACERS(:,:,:,N) = TRACERS(:,:,:,N) / AIRDEN
-                  end where
-               enddo
-            endif
-#endif
+
          endif
 
          ! Update tracer mass conservation
@@ -1220,6 +1212,17 @@ contains
             endif
             if (MASS1 /= 0.0) TMASS1=TMASS1/MASS1
          endif
+
+
+#ifdef ADJOINT
+            if (isAdjoint) then
+               do N=1,NAdv
+                  where (AIRDEN > 0.0_FVPRC)
+                     TRACERS(:,:,:,N) = TRACERS(:,:,:,N) * AIRDEN
+                  end where
+               enddo
+            endif
+#endif
 
          if (chk_mass .and. is_master()) then
 #ifdef PRINT_MASS
