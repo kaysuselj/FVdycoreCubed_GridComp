@@ -463,6 +463,18 @@ contains
       if (trim(ModelPhase) == 'ADJOINT') &
            isAdjoint = .true.
       if (isAdjoint) dt = -dt
+
+   if (MAPL_Am_I_Root()) then
+      write(*,*) 'ADVCORE_SETSERVICES_DT ndt=', ndt,               &
+           ' model_phase=', trim(modelPhase),               &
+           ' isAdjoint=', isAdjoint, ' final_dt=', dt
+   endif
+#else
+   if (MAPL_Am_I_Root()) then
+      write(*,*) 'ADVCORE_SETSERVICES_DT ndt=', ndt,               &
+           ' model_phase=FORWARD (no ADJOINT build)',       &
+           ' isAdjoint=.false. final_dt=', dt
+   endif 
 #endif
 
       ! Start up FV if AdvCore is running without FV3_DynCoreIsRunning
