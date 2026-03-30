@@ -246,8 +246,8 @@ contains
 
    #ifdef ADJOINT
        call MAPL_AddImportSpec ( gc,                                  &
-          SHORT_NAME = 'Met_AIRDEN',                                &
-          LONG_NAME  = 'dry_air_density',                           &
+          SHORT_NAME = 'ADV_AIRDEN',                                &
+          LONG_NAME  = 'dry_air_density_for_advection',             &
           UNITS      = 'kg m-3',                                    &
           PRECISION  = ESMF_KIND_R8,                                &
           DIMS       = MAPL_DimsHorzVert,                           &
@@ -758,7 +758,7 @@ contains
 
 #ifdef ADJOINT
       if (isAdjoint) then
-         CALL MAPL_GetPointer(IMPORT, iAIRDEN, 'Met_AIRDEN', ALLOC=.TRUE., RC=STATUS)
+         CALL MAPL_GetPointer(IMPORT, iAIRDEN, 'ADV_AIRDEN', ALLOC=.TRUE., RC=STATUS)
          VERIFY_(STATUS)
          ALLOCATE( AIRDEN(IM,JM,LM) )
          AIRDEN = iAIRDEN
