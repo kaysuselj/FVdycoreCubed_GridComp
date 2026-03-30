@@ -78,6 +78,7 @@ module AdvCore_GridCompMod
       logical     :: FV3_DynCoreIsRunning=.false.
       integer     :: AdvCore_Advection
       integer     :: Use_Total_Air_Pressure
+      logical     :: import_mass_flux_from_extdata = .false.
       logical     :: chk_mass=.false.
 #ifdef ADJOINT
       logical                    :: isAdjoint=.false.
@@ -243,6 +244,17 @@ contains
          VLOCATION  = MAPL_VLocationCenter,           RC=STATUS  )
     VERIFY_(STATUS)
 
+   #ifdef ADJOINT
+       call MAPL_AddImportSpec ( gc,                                  &
+          SHORT_NAME = 'Met_AIRDEN',                                &
+          LONG_NAME  = 'dry_air_density',                           &
+          UNITS      = 'kg m-3',                                    &
+          PRECISION  = ESMF_KIND_R8,                                &
+          DIMS       = MAPL_DimsHorzVert,                           &
+          VLOCATION  = MAPL_VLocationCenter,           RC=STATUS  )
+       VERIFY_(STATUS)
+   #endif
+
   !EXPORT STATE:
      call MAPL_AddExportSpec ( gc,                                  &
           SHORT_NAME = 'AREA',                                      &
@@ -348,6 +360,19 @@ contains
                             label='USE_TOTAL_AIR_PRESSURE_IN_ADVECTION:', &
                             default=0,                                    &
                             RC=STATUS )
+      VERIFY_(STATUS)
+
+      ! This is also read by GCHPctmEnv, but AdvCore needs its own copy:
+      ! AdvCore receives only MFX/MFY and cannot infer whether they came
+      ! from ExtData (MFXC/MFYC) or from winds (UA/VA -> fv_computeMassFluxes).
+      ! In adjoint mode children can be added in reverse order, so relying on
+      ! GCHPctmEnv module state here is not robust.
+      call MAPL_GetResource(MAPL,                          &
+                   import_mass_flux_from_extdata, &
+                   label='IMPORT_MASS_FLUX_FROM_EXTDATA:', &
+                   default=.false.,               &
+                   RC=STATUS )
+      VERIFY_(STATUS)
 
 
       ! Start up FMS/MPP
@@ -592,6 +617,9 @@ contains
       REAL(REAL8), POINTER, DIMENSION(:,:,:)   :: iDryPLE0 ! GCHP dry
       REAL(REAL8), POINTER, DIMENSION(:,:,:)   :: iDryPLE1 ! GCHP dry
       REAL(REAL8), POINTER, DIMENSION(:,:,:)   :: iSPHU0   ! GCHP total
+   #ifdef ADJOINT
+      REAL(REAL8), POINTER, DIMENSION(:,:,:)   :: iAIRDEN  ! dry air density
+   #endif
 
 ! Exports
       REAL(REAL8), POINTER, DIMENSION(:,:,:)   :: ePLE     ! GCHP
@@ -609,6 +637,9 @@ contains
       REAL(FVPRC), POINTER, DIMENSION(:,:,:)   :: DryPLE1 ! GCHP dry
       REAL(FVPRC), POINTER, DIMENSION(:,:,:)   :: PLEAdv  ! GCHP total
       REAL(FVPRC), POINTER, DIMENSION(:,:,:)   :: SPHU0   ! GCHP total
+   #ifdef ADJOINT
+      REAL(FVPRC), POINTER, DIMENSION(:,:,:)   :: AIRDEN => NULL() ! selected air density
+   #endif
       REAL(FVPRC), POINTER, DIMENSION(:)       :: AK
       REAL(FVPRC), POINTER, DIMENSION(:)       :: BK
       REAL(REAL8), allocatable :: ak_r8(:),bk_r8(:)
@@ -652,6 +683,8 @@ contains
       integer, parameter                :: DI = 3, DJ = 4, DL = 5
       ! Debug variables
       INTEGER, parameter             :: I_DBG = 6, J_DBG = 5, L_DBG=1
+   real(FVPRC)                    :: rhoDryMin, rhoDryMax
+   real(FVPRC)                    :: rhoUseMin, rhoUseMax
 #endif
 
 ! Get my name and set-up traceback handle
@@ -722,6 +755,38 @@ contains
          DryPLE0 = iDryPLE0
          DryPLE1 = iDryPLE1
       ENDIF
+
+#ifdef ADJOINT
+      if (isAdjoint) then
+         CALL MAPL_GetPointer(IMPORT, iAIRDEN, 'Met_AIRDEN', ALLOC=.TRUE., RC=STATUS)
+         VERIFY_(STATUS)
+         ALLOCATE( AIRDEN(IM,JM,LM) )
+         AIRDEN = iAIRDEN
+
+         rhoDryMin = minval(AIRDEN)
+         rhoDryMax = maxval(AIRDEN)
+
+         ! For total-air runs, convert dry-air density to moist-air density
+         if ( Use_Total_Air_Pressure > 0 ) then
+            where (1.0_FVPRC - SPHU0 > 0.0_FVPRC)
+               AIRDEN = AIRDEN / (1.0_FVPRC - SPHU0)
+            end where
+         endif
+
+         if (MAPL_Am_I_Root() .and. firstRun) then
+            rhoUseMin = minval(AIRDEN)
+            rhoUseMax = maxval(AIRDEN)
+            if (Use_Total_Air_Pressure > 0) then
+               write(*,*) 'ADVCORE_DENSITY first adjoint step: ',                 &
+                          'dry_min=', rhoDryMin, ' dry_max=', rhoDryMax,         &
+                          ' moist_used_min=', rhoUseMin, ' moist_used_max=', rhoUseMax
+            else
+               write(*,*) 'ADVCORE_DENSITY first adjoint step: ',                 &
+                          'dry_min=', rhoDryMin, ' dry_max=', rhoDryMax
+            endif
+         endif
+      endif
+#endif
 
       ALLOCATE(  PLE0(IM,JM,LM+1) )
       ALLOCATE(  PLE1(IM,JM,LM+1) )
@@ -1006,20 +1071,41 @@ contains
          endif
 
 #ifdef ADJOINT
-         if (.not. isAdjoint) &
-#endif
+         if (.not. isAdjoint) then
+            firstRun=.false.
+         else
+            ! In adjoint, allow advection to run on first pass
+            if (firstRun) firstRun=.false.
+         end if
+#else
          firstRun=.false.
+#endif
 
          ! Run FV3 advection
          !------------------
 #ifdef ADJOINT
-         if (AdvCore_Advection>0 .and. .not. firstRun) then
+         if (AdvCore_Advection>0) then
          IF (MAPL_Am_I_Root()) THEN
             WRITE(*,546) dt
 546         FORMAT(' calling offline_tracer_advection with timestep = ', f8.3)
          ENDIF
 #else
          if (AdvCore_Advection>0) then
+#endif
+
+#ifdef ADJOINT
+            if (isAdjoint .and. import_mass_flux_from_extdata) then
+               MFX = -MFX
+               MFY = -MFY
+            endif
+
+            if (isAdjoint) then
+               do N=1,NAdv
+                  where (AIRDEN > 0.0_FVPRC)
+                     TRACERS(:,:,:,N) = TRACERS(:,:,:,N) / AIRDEN
+                  end where
+               enddo
+            endif
 #endif
 
             if (MAPL_Am_I_Root()) then
@@ -1080,11 +1166,17 @@ contains
                                              dt,                   &
                                              PLEAdv )
             endif
-         endif
+
 #ifdef ADJOINT
-         if (isAdjoint) &
-              firstRun = .false.
+            if (isAdjoint) then
+               do N=1,NAdv
+                  where (AIRDEN > 0.0_FVPRC)
+                     TRACERS(:,:,:,N) = TRACERS(:,:,:,N) / AIRDEN
+                  end where
+               enddo
+            endif
 #endif
+         endif
 
          ! Update tracer mass conservation
          !-------------------------------------------------------------------
@@ -1216,6 +1308,12 @@ contains
          DEALLOCATE( DryPLE0 )
          DEALLOCATE( DryPLE1 )
       endif
+
+#ifdef ADJOINT
+      if (associated(AIRDEN)) then
+         DEALLOCATE( AIRDEN )
+      endif
+#endif
 
       call MAPL_TimerOff(MAPL,"RUN")
       call MAPL_TimerOff(MAPL,"TOTAL")
