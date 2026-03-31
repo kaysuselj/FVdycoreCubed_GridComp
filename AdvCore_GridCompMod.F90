@@ -706,6 +706,7 @@ contains
    real(FVPRC)                    :: rhoDryMin, rhoDryMax
    real(FVPRC)                    :: rhoUseMin, rhoUseMax
    real(REAL8)                    :: adjLocalSum, adjGlobalSum
+   real(REAL8), allocatable       :: adjPreAdvSums(:)
    integer                        :: nAdjScaled
    type(ESMF_VM)                  :: vmRun
 #endif
@@ -833,24 +834,21 @@ contains
       PLEAdv = 0.0d0
 #ifdef ADJOINT
       if (isAdjoint) then
-         ! Backward integration: swap pressure-edge fields and negate fluxes
+         ! Backward integration: swap pressure-edge fields
+         ! MFX/MFY/CX/CY are already negated upstream by GCHPctmEnv (dt = -dt)
          PLE0 = iPLE1
          PLE1 = iPLE0
-         MFX  = -iMFX
-         MFY  = -iMFY
-         CX   = -iCX
-         CY   = -iCY
       else
 #endif
          PLE0 = iPLE0
          PLE1 = iPLE1
-         MFX  = iMFX
-         MFY  = iMFY
-         CX   = iCX
-         CY   = iCY
 #ifdef ADJOINT
       end if
 #endif
+      MFX = iMFX
+      MFY = iMFY
+      CX  = iCX
+      CY  = iCY
 
       ! The quantities to be advected come as friendlies in a bundle
       !  in the import state.
@@ -1207,6 +1205,21 @@ contains
                   enddo
                endif
 
+               ! Save global sum before density scaling for conservation fix
+               call ESMF_VMGetCurrent(vmRun, rc=STATUS)
+               VERIFY_(STATUS)
+               ALLOCATE( adjPreAdvSums(NQ), stat=STATUS )
+               VERIFY_(STATUS)
+               adjPreAdvSums = 0.0_REAL8
+               do N=1,NQ
+                  if (.not. isAdjointTracer(N)) cycle
+                  adjLocalSum = SUM( REAL(TRACERS(:,:,:,N), REAL8) )
+                  call MAPL_CommsAllReduceSum(vmRun, sendbuf=adjLocalSum, recvbuf=adjGlobalSum, &
+                                             cnt=1, rc=STATUS)
+                  VERIFY_(STATUS)
+                  adjPreAdvSums(N) = adjGlobalSum
+               enddo
+
                do N=1,NQ
                   if (.not. isAdjointTracer(N)) cycle
                   where (AIRDEN > 0.0_FVPRC)
@@ -1335,6 +1348,24 @@ contains
                      TRACERS(:,:,:,N) = TRACERS(:,:,:,N) * AIRDEN
                   end where
                enddo
+
+               ! Restore pre-scaling global sum to undo calcScalingFactor applied
+               ! inside offline_tracer_advection to adjoint tracers
+               call ESMF_VMGetCurrent(vmRun, rc=STATUS)
+               VERIFY_(STATUS)
+               do N=1,NQ
+                  if (.not. isAdjointTracer(N)) cycle
+                  if (adjPreAdvSums(N) == 0.0_REAL8) cycle
+                  adjLocalSum = SUM( REAL(TRACERS(:,:,:,N), REAL8) )
+                  call MAPL_CommsAllReduceSum(vmRun, sendbuf=adjLocalSum, recvbuf=adjGlobalSum, &
+                                             cnt=1, rc=STATUS)
+                  VERIFY_(STATUS)
+                  if (adjGlobalSum /= 0.0_REAL8) then
+                     TRACERS(:,:,:,N) = TRACERS(:,:,:,N) * REAL(adjPreAdvSums(N) / adjGlobalSum, FVPRC)
+                  endif
+               enddo
+               DEALLOCATE( adjPreAdvSums, stat=STATUS )
+               VERIFY_(STATUS)
 
                if (ADVCORE_ADJ_DEBUG) then
                   call ESMF_VMGetCurrent(vmRun, rc=STATUS)
