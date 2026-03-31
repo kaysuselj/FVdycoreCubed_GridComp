@@ -1156,13 +1156,6 @@ contains
 
 
             if (isAdjoint) then
-               do N=1,NQ
-                  if (.not. isAdjointTracer(N)) cycle
-                  where (AIRDEN > 0.0_FVPRC)
-                     TRACERS(:,:,:,N) = TRACERS(:,:,:,N) / AIRDEN
-                  end where
-               enddo
-
                if (ADVCORE_ADJ_DEBUG) then
                   adjLocalSum = 0.0_REAL8
                   nAdjScaled = 0
@@ -1177,10 +1170,17 @@ contains
                                               cnt=1, rc=STATUS)
                   VERIFY_(STATUS)
                   if (MAPL_Am_I_Root()) then
-                     write(*,*) 'ADVCORE_ADJ_GLOBAL_SUM stage=after_div_airden sum=', adjGlobalSum, &
+                     write(*,*) 'ADVCORE_ADJ_GLOBAL_SUM stage=before_div_airden sum=', adjGlobalSum, &
                                 ' n_adj=', nAdjScaled
                   endif
                endif
+
+               do N=1,NQ
+                  if (.not. isAdjointTracer(N)) cycle
+                  where (AIRDEN > 0.0_FVPRC)
+                     TRACERS(:,:,:,N) = TRACERS(:,:,:,N) / AIRDEN
+                  end where
+               enddo
             endif
 #endif
 
