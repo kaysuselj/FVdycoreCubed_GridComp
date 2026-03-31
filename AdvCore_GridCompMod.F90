@@ -80,6 +80,7 @@ module AdvCore_GridCompMod
       integer     :: Use_Total_Air_Pressure
       logical     :: import_mass_flux_from_extdata = .false.
       logical     :: chk_mass=.false.
+      logical, parameter :: ADVCORE_ADJ_DEBUG = .true.
 #ifdef ADJOINT
       logical                    :: isAdjoint=.false.
       character(len=ESMF_MAXSTR) :: modelPhase
@@ -464,17 +465,21 @@ contains
            isAdjoint = .true.
       if (isAdjoint) dt = -dt
 
-   if (MAPL_Am_I_Root()) then
-      write(*,*) 'ADVCORE_SETSERVICES_DT ndt=', ndt,               &
-           ' model_phase=', trim(modelPhase),               &
-           ' isAdjoint=', isAdjoint, ' final_dt=', dt
-   endif
+      if (MAPL_Am_I_Root()) then
+          if (ADVCORE_ADJ_DEBUG) then
+           write(*,*) 'ADVCORE_SETSERVICES_DT ndt=', ndt,               &
+              ' model_phase=', trim(modelPhase),               &
+              ' isAdjoint=', isAdjoint, ' final_dt=', dt
+          endif
+      endif
 #else
-   if (MAPL_Am_I_Root()) then
-      write(*,*) 'ADVCORE_SETSERVICES_DT ndt=', ndt,               &
-           ' model_phase=FORWARD (no ADJOINT build)',       &
-           ' isAdjoint=.false. final_dt=', dt
-   endif 
+      if (MAPL_Am_I_Root()) then
+          if (ADVCORE_ADJ_DEBUG) then
+           write(*,*) 'ADVCORE_SETSERVICES_DT ndt=', ndt,               &
+              ' model_phase=FORWARD (no ADJOINT build)',       &
+              ' isAdjoint=.false. final_dt=', dt
+          endif
+      endif
 #endif
 
       ! Start up FV if AdvCore is running without FV3_DynCoreIsRunning
@@ -651,6 +656,9 @@ contains
       REAL(FVPRC), POINTER, DIMENSION(:,:,:)   :: SPHU0   ! GCHP total
 #ifdef ADJOINT
       REAL(FVPRC), POINTER, DIMENSION(:,:,:)   :: AIRDEN => NULL() ! selected air density
+   logical, allocatable                      :: isAdjointTracer(:)
+   logical                                   :: isAdjField
+   integer                                   :: nAdjointTracers
 #endif
       REAL(FVPRC), POINTER, DIMENSION(:)       :: AK
       REAL(FVPRC), POINTER, DIMENSION(:)       :: BK
@@ -697,6 +705,9 @@ contains
       INTEGER, parameter             :: I_DBG = 6, J_DBG = 5, L_DBG=1
    real(FVPRC)                    :: rhoDryMin, rhoDryMax
    real(FVPRC)                    :: rhoUseMin, rhoUseMax
+   real(REAL8)                    :: adjLocalSum, adjGlobalSum
+   integer                        :: nAdjScaled
+   type(ESMF_VM)                  :: vmRun
 #endif
 
 ! Get my name and set-up traceback handle
@@ -786,15 +797,17 @@ contains
          endif
 
          if (MAPL_Am_I_Root() .and. firstRun) then
-            rhoUseMin = minval(AIRDEN)
-            rhoUseMax = maxval(AIRDEN)
-            if (Use_Total_Air_Pressure > 0) then
-               write(*,*) 'ADVCORE_DENSITY first adjoint step: ',                 &
-                          'dry_min=', rhoDryMin, ' dry_max=', rhoDryMax,         &
-                          ' moist_used_min=', rhoUseMin, ' moist_used_max=', rhoUseMax
-            else
-               write(*,*) 'ADVCORE_DENSITY first adjoint step: ',                 &
-                          'dry_min=', rhoDryMin, ' dry_max=', rhoDryMax
+            if (ADVCORE_ADJ_DEBUG) then
+               rhoUseMin = minval(AIRDEN)
+               rhoUseMax = maxval(AIRDEN)
+               if (Use_Total_Air_Pressure > 0) then
+                  write(*,*) 'ADVCORE_DENSITY first adjoint step: ',                 &
+                             'dry_min=', rhoDryMin, ' dry_max=', rhoDryMax,         &
+                             ' moist_used_min=', rhoUseMin, ' moist_used_max=', rhoUseMax
+               else
+                  write(*,*) 'ADVCORE_DENSITY first adjoint step: ',                 &
+                             'dry_min=', rhoDryMin, ' dry_max=', rhoDryMax
+               endif
             endif
          endif
       endif
@@ -970,6 +983,12 @@ contains
          VERIFY_(STATUS)
          ALLOCATE( advTracers(NQ),stat=STATUS ) ! Does not include SPHU tracer
          VERIFY_(STATUS)
+#ifdef ADJOINT
+         ALLOCATE( isAdjointTracer(NAdv), stat=STATUS )
+         VERIFY_(STATUS)
+         isAdjointTracer = .false.
+         nAdjointTracers = 0
+#endif
 
          if (NQ /= NQ_SAVED) then
             write(STRING,'(A,I5,A)') "AdvCore is Advecting the following ", nq, " tracers in FV3:"
@@ -988,6 +1007,22 @@ contains
             advTracers(N)%is_r4 = (kind == ESMF_TYPEKIND_R4)   ! Is real*4?
             advTracers(N)%tName = fieldName
 
+#ifdef ADJOINT
+            isAdjField = .false.
+            if (len_trim(fieldName) >= 4) then
+               isAdjField = (fieldName(len_trim(fieldName)-3:len_trim(fieldName)) == '_ADJ')
+            endif
+            isAdjointTracer(N) = isAdjField
+            if (isAdjField) then
+               nAdjointTracers = nAdjointTracers + 1
+               if (isAdjoint .and. firstRun .and. MAPL_Am_I_Root()) then
+                  if (ADVCORE_ADJ_DEBUG) then
+                     write(*,*) 'ADVCORE_ADJ_TRACER_INDEX idx=', N, ' name=', trim(fieldName)
+                  endif
+               endif
+            endif
+#endif
+
             if (NQ /= NQ_SAVED) then
                call WRITE_PARALLEL( trim(fieldName) )
             endif
@@ -1005,6 +1040,14 @@ contains
             end if
 
          end do
+
+#ifdef ADJOINT
+         if (isAdjoint .and. firstRun .and. MAPL_Am_I_Root()) then
+            if (ADVCORE_ADJ_DEBUG) then
+               write(*,*) 'ADVCORE_ADJ_TRACER_COUNT n_adj=', nAdjointTracers, ' n_total=', NQ
+            endif
+         endif
+#endif
 
          ! If using total air then set extra tracer to specific humidity and
          ! convert all other tracers from kg/kg dry to kg/kg total air
@@ -1111,27 +1154,65 @@ contains
                MFY = -MFY
             endif
 
+
             if (isAdjoint) then
-               do N=1,NAdv
+               do N=1,NQ
+                  if (.not. isAdjointTracer(N)) cycle
                   where (AIRDEN > 0.0_FVPRC)
                      TRACERS(:,:,:,N) = TRACERS(:,:,:,N) / AIRDEN
                   end where
                enddo
+
+               if (ADVCORE_ADJ_DEBUG) then
+                  adjLocalSum = 0.0_REAL8
+                  nAdjScaled = 0
+                  do N=1,NQ
+                     if (.not. isAdjointTracer(N)) cycle
+                     nAdjScaled = nAdjScaled + 1
+                     adjLocalSum = adjLocalSum + SUM( REAL(TRACERS(:,:,:,N), REAL8) )
+                  enddo
+                  call ESMF_VMGetCurrent(vmRun, rc=STATUS)
+                  VERIFY_(STATUS)
+                  call MAPL_CommsAllReduceSum(vmRun, sendbuf=adjLocalSum, recvbuf=adjGlobalSum, &
+                                              cnt=1, rc=STATUS)
+                  VERIFY_(STATUS)
+                  if (MAPL_Am_I_Root()) then
+                     write(*,*) 'ADVCORE_ADJ_GLOBAL_SUM stage=after_div_airden sum=', adjGlobalSum, &
+                                ' n_adj=', nAdjScaled
+                  endif
+               endif
             endif
 #endif
 
-            if (MAPL_Am_I_Root()) then
-               mfxMin = minval(MFX)
-               mfxMax = maxval(MFX)
-               mfyMin = minval(MFY)
-               mfyMax = maxval(MFY)
-               cxMin  = minval(CX)
-               cxMax  = maxval(CX)
-               cyMin  = minval(CY)
-               cyMax  = maxval(CY)
-               write(*,*) 'ADVCORE_INPUT dt=', dt, ' mfxmin=', mfxMin, ' mfxmax=', mfxMax, &
-                          ' mfymin=', mfyMin, ' mfymax=', mfyMax, ' cxmin=', cxMin,        &
-                          ' cxmax=', cxMax, ' cymin=', cyMin, ' cymax=', cyMax
+            if (ADVCORE_ADJ_DEBUG) then
+               if (MAPL_Am_I_Root()) then
+                  mfxMin = minval(MFX)
+                  mfxMax = maxval(MFX)
+                  mfyMin = minval(MFY)
+                  mfyMax = maxval(MFY)
+                  cxMin  = minval(CX)
+                  cxMax  = maxval(CX)
+                  cyMin  = minval(CY)
+                  cyMax  = maxval(CY)
+#ifdef ADJOINT
+                  if (isAdjoint .and. associated(AIRDEN)) then
+                     rhoDryMin = minval(AIRDEN)
+                     rhoDryMax = maxval(AIRDEN)
+                     write(*,*) 'ADVCORE_INPUT dt=', dt, ' mfxmin=', mfxMin, ' mfxmax=', mfxMax, &
+                                ' mfymin=', mfyMin, ' mfymax=', mfyMax, ' cxmin=', cxMin,        &
+                                ' cxmax=', cxMax, ' cymin=', cyMin, ' cymax=', cyMax,            &
+                                ' airden_min=', rhoDryMin, ' airden_max=', rhoDryMax
+                  else
+                     write(*,*) 'ADVCORE_INPUT dt=', dt, ' mfxmin=', mfxMin, ' mfxmax=', mfxMax, &
+                                ' mfymin=', mfyMin, ' mfymax=', mfyMax, ' cxmin=', cxMin,        &
+                                ' cxmax=', cxMax, ' cymin=', cyMin, ' cymax=', cyMax
+                  endif
+#else
+                  write(*,*) 'ADVCORE_INPUT dt=', dt, ' mfxmin=', mfxMin, ' mfxmax=', mfxMax, &
+                             ' mfymin=', mfyMin, ' mfymax=', mfyMax, ' cxmin=', cxMin,        &
+                             ' cxmax=', cxMax, ' cymin=', cyMin, ' cymax=', cyMax
+#endif
+               endif
             endif
 
             ! Run offline advection
@@ -1216,11 +1297,31 @@ contains
 
 #ifdef ADJOINT
             if (isAdjoint) then
-               do N=1,NAdv
+               do N=1,NQ
+                  if (.not. isAdjointTracer(N)) cycle
                   where (AIRDEN > 0.0_FVPRC)
                      TRACERS(:,:,:,N) = TRACERS(:,:,:,N) * AIRDEN
                   end where
                enddo
+
+               if (ADVCORE_ADJ_DEBUG) then
+                  adjLocalSum = 0.0_REAL8
+                  nAdjScaled = 0
+                  do N=1,NQ
+                     if (.not. isAdjointTracer(N)) cycle
+                     nAdjScaled = nAdjScaled + 1
+                     adjLocalSum = adjLocalSum + SUM( REAL(TRACERS(:,:,:,N), REAL8) )
+                  enddo
+                  call ESMF_VMGetCurrent(vmRun, rc=STATUS)
+                  VERIFY_(STATUS)
+                  call MAPL_CommsAllReduceSum(vmRun, sendbuf=adjLocalSum, recvbuf=adjGlobalSum, &
+                                              cnt=1, rc=STATUS)
+                  VERIFY_(STATUS)
+                  if (MAPL_Am_I_Root()) then
+                     write(*,*) 'ADVCORE_ADJ_GLOBAL_SUM stage=after_mul_airden sum=', adjGlobalSum, &
+                                ' n_adj=', nAdjScaled
+                  endif
+               endif
             endif
 #endif
 
@@ -1285,6 +1386,10 @@ contains
          !----------------------------------------------------------------
          DEALLOCATE( TRACERS,stat=STATUS )
          VERIFY_(STATUS)
+#ifdef ADJOINT
+         DEALLOCATE( isAdjointTracer, stat=STATUS )
+         VERIFY_(STATUS)
+#endif
 
       end if ! NQ > 0
 
