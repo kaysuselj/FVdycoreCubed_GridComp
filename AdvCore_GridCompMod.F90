@@ -1049,6 +1049,22 @@ contains
                write(*,*) 'ADVCORE_ADJ_TRACER_COUNT n_adj=', nAdjointTracers, ' n_total=', NQ
             endif
          endif
+
+         if (isAdjoint .and. ADVCORE_ADJ_DEBUG) then
+            call ESMF_VMGetCurrent(vmRun, rc=STATUS)
+            VERIFY_(STATUS)
+            do N=1,NQ
+               if (.not. isAdjointTracer(N)) cycle
+               adjLocalSum = SUM( REAL(TRACERS(:,:,:,N), REAL8) )
+               call MAPL_CommsAllReduceSum(vmRun, sendbuf=adjLocalSum, recvbuf=adjGlobalSum, &
+                                           cnt=1, rc=STATUS)
+               VERIFY_(STATUS)
+               if (MAPL_Am_I_Root()) then
+                  write(*,*) 'ADVCORE_ADJ_GLOBAL_SUM stage=after_import idx=', N, &
+                             ' name=', trim(advTracers(N)%tName), ' sum=', adjGlobalSum
+               endif
+            enddo
+         endif
 #endif
 
          ! If using total air then set extra tracer to specific humidity and
