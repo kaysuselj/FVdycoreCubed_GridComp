@@ -1008,6 +1008,17 @@ contains
             advTracers(N)%tName = fieldName
 
 #ifdef ADJOINT
+            ! Print global sum of adjoint tracers immediately after TRADV copy
+            if (isAdjoint .and. isAdjointTracer(N) .and. MAPL_Am_I_Root()) then
+               if (ADVCORE_ADJ_DEBUG) then
+                  real(FVPRC) :: adjSum
+                  adjSum = sum(array)
+                  write(*,*) 'ADVCORE_ADJ_GLOBAL_SUM stage=after_tradv_copy idx=', N, ' name=', trim(fieldName), ' sum=', adjSum
+               endif
+            endif
+#endif
+
+#ifdef ADJOINT
             isAdjField = .false.
             if (len_trim(fieldName) >= 4) then
                isAdjField = (fieldName(len_trim(fieldName)-3:len_trim(fieldName)) == '_ADJ')
