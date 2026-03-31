@@ -1007,16 +1007,7 @@ contains
             advTracers(N)%is_r4 = (kind == ESMF_TYPEKIND_R4)   ! Is real*4?
             advTracers(N)%tName = fieldName
 
-#ifdef ADJOINT
-            ! Print global sum of adjoint tracers immediately after TRADV copy
-            if (isAdjoint .and. isAdjointTracer(N) .and. MAPL_Am_I_Root()) then
-               if (ADVCORE_ADJ_DEBUG) then
-                  real(FVPRC) :: adjSum
-                  adjSum = sum(array)
-                  write(*,*) 'ADVCORE_ADJ_GLOBAL_SUM stage=after_tradv_copy idx=', N, ' name=', trim(fieldName), ' sum=', adjSum
-               endif
-            endif
-#endif
+
 
 #ifdef ADJOINT
             isAdjField = .false.
@@ -1168,22 +1159,19 @@ contains
 
             if (isAdjoint) then
                if (ADVCORE_ADJ_DEBUG) then
-                  adjLocalSum = 0.0_REAL8
-                  nAdjScaled = 0
-                  do N=1,NQ
-                     if (.not. isAdjointTracer(N)) cycle
-                     nAdjScaled = nAdjScaled + 1
-                     adjLocalSum = adjLocalSum + SUM( REAL(TRACERS(:,:,:,N), REAL8) )
-                  enddo
                   call ESMF_VMGetCurrent(vmRun, rc=STATUS)
                   VERIFY_(STATUS)
-                  call MAPL_CommsAllReduceSum(vmRun, sendbuf=adjLocalSum, recvbuf=adjGlobalSum, &
-                                              cnt=1, rc=STATUS)
-                  VERIFY_(STATUS)
-                  if (MAPL_Am_I_Root()) then
-                     write(*,*) 'ADVCORE_ADJ_GLOBAL_SUM stage=before_div_airden sum=', adjGlobalSum, &
-                                ' n_adj=', nAdjScaled
-                  endif
+                  do N=1,NQ
+                     if (.not. isAdjointTracer(N)) cycle
+                     adjLocalSum = SUM( REAL(TRACERS(:,:,:,N), REAL8) )
+                     call MAPL_CommsAllReduceSum(vmRun, sendbuf=adjLocalSum, recvbuf=adjGlobalSum, &
+                                                 cnt=1, rc=STATUS)
+                     VERIFY_(STATUS)
+                     if (MAPL_Am_I_Root()) then
+                        write(*,*) 'ADVCORE_ADJ_GLOBAL_SUM stage=before_div_airden idx=', N, &
+                                   ' name=', trim(advTracers(N)%tName), ' sum=', adjGlobalSum
+                     endif
+                  enddo
                endif
 
                do N=1,NQ
@@ -1316,22 +1304,19 @@ contains
                enddo
 
                if (ADVCORE_ADJ_DEBUG) then
-                  adjLocalSum = 0.0_REAL8
-                  nAdjScaled = 0
-                  do N=1,NQ
-                     if (.not. isAdjointTracer(N)) cycle
-                     nAdjScaled = nAdjScaled + 1
-                     adjLocalSum = adjLocalSum + SUM( REAL(TRACERS(:,:,:,N), REAL8) )
-                  enddo
                   call ESMF_VMGetCurrent(vmRun, rc=STATUS)
                   VERIFY_(STATUS)
-                  call MAPL_CommsAllReduceSum(vmRun, sendbuf=adjLocalSum, recvbuf=adjGlobalSum, &
-                                              cnt=1, rc=STATUS)
-                  VERIFY_(STATUS)
-                  if (MAPL_Am_I_Root()) then
-                     write(*,*) 'ADVCORE_ADJ_GLOBAL_SUM stage=after_mul_airden sum=', adjGlobalSum, &
-                                ' n_adj=', nAdjScaled
-                  endif
+                  do N=1,NQ
+                     if (.not. isAdjointTracer(N)) cycle
+                     adjLocalSum = SUM( REAL(TRACERS(:,:,:,N), REAL8) )
+                     call MAPL_CommsAllReduceSum(vmRun, sendbuf=adjLocalSum, recvbuf=adjGlobalSum, &
+                                                 cnt=1, rc=STATUS)
+                     VERIFY_(STATUS)
+                     if (MAPL_Am_I_Root()) then
+                        write(*,*) 'ADVCORE_ADJ_GLOBAL_SUM stage=after_mul_airden idx=', N, &
+                                   ' name=', trim(advTracers(N)%tName), ' sum=', adjGlobalSum
+                     endif
+                  enddo
                endif
             endif
 #endif
