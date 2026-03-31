@@ -775,8 +775,17 @@ contains
          VERIFY_(STATUS)
          ALLOCATE( DryPLE0(IM,JM,LM+1) )
          ALLOCATE( DryPLE1(IM,JM,LM+1) )
-         DryPLE0 = iDryPLE0
-         DryPLE1 = iDryPLE1
+#ifdef ADJOINT
+         if (isAdjoint) then
+            DryPLE0 = iDryPLE1
+            DryPLE1 = iDryPLE0
+         else
+#endif
+            DryPLE0 = iDryPLE0
+            DryPLE1 = iDryPLE1
+#ifdef ADJOINT
+         end if
+#endif
       ENDIF
 
 #ifdef ADJOINT
@@ -821,13 +830,27 @@ contains
       ALLOCATE(    CX(IM,JM,LM  ) )
       ALLOCATE(    CY(IM,JM,LM  ) )
 
-      PLE0   = iPLE0
-      PLE1   = iPLE1 
       PLEAdv = 0.0d0
-      MFX    = iMFX
-      MFY    = iMFY
-      CX     = iCX
-      CY     = iCY
+#ifdef ADJOINT
+      if (isAdjoint) then
+         ! Backward integration: swap pressure-edge fields and negate fluxes
+         PLE0 = iPLE1
+         PLE1 = iPLE0
+         MFX  = -iMFX
+         MFY  = -iMFY
+         CX   = -iCX
+         CY   = -iCY
+      else
+#endif
+         PLE0 = iPLE0
+         PLE1 = iPLE1
+         MFX  = iMFX
+         MFY  = iMFY
+         CX   = iCX
+         CY   = iCY
+#ifdef ADJOINT
+      end if
+#endif
 
       ! The quantities to be advected come as friendlies in a bundle
       !  in the import state.
@@ -1167,12 +1190,6 @@ contains
 #endif
 
 #ifdef ADJOINT
-            if (isAdjoint .and. import_mass_flux_from_extdata) then
-               MFX = -MFX
-               MFY = -MFY
-            endif
-
-
             if (isAdjoint) then
                if (ADVCORE_ADJ_DEBUG) then
                   call ESMF_VMGetCurrent(vmRun, rc=STATUS)
