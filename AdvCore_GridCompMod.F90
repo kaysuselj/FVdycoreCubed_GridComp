@@ -1261,6 +1261,11 @@ contains
             endif
 
             ! Run offline advection
+#ifdef ADJOINT
+            ! Adjoint tracers can be negative (they are sensitivities, not
+            ! concentrations). Disable fill so fillz does not zero them out.
+            if (isAdjoint) FV_Atm(1)%flagstruct%fill = .false.
+#endif
             if ( Use_Total_Air_Pressure > 0 ) then
                call offline_tracer_advection( TRACERS,              &
                                               PLE0,                 &
@@ -1304,6 +1309,9 @@ contains
                                              dt,                   &
                                              PLEAdv )
             endif
+#ifdef ADJOINT
+            if (isAdjoint) FV_Atm(1)%flagstruct%fill = .true.
+#endif
 
 
          endif
