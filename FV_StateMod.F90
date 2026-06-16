@@ -1711,14 +1711,14 @@ subroutine FV_Run (STATE, CLOCK, GC, RC)
 
     call MAPL_TimerOn(MAPL,"--FV_DYNAMICS")
     if (.not. FV_OFF) then
-   if (mpp_pe() == mpp_root_pe()) then
-      uMin = minval(FV_Atm(1)%u(isc:iec,jsc:jec,1:npz))
-      uMax = maxval(FV_Atm(1)%u(isc:iec,jsc:jec,1:npz))
-      vMin = minval(FV_Atm(1)%v(isc:iec,jsc:jec,1:npz))
-      vMax = maxval(FV_Atm(1)%v(isc:iec,jsc:jec,1:npz))
-      write(*,*) 'ADJ_CO2_SUM DYN_INPUT dt=', myDT, ' umin=', uMin, ' umax=', uMax, &
-              ' vmin=', vMin, ' vmax=', vMax
-   endif
+!   if (mpp_pe() == mpp_root_pe()) then
+!      uMin = minval(FV_Atm(1)%u(isc:iec,jsc:jec,1:npz))
+!      uMax = maxval(FV_Atm(1)%u(isc:iec,jsc:jec,1:npz))
+!      vMin = minval(FV_Atm(1)%v(isc:iec,jsc:jec,1:npz))
+!      vMax = maxval(FV_Atm(1)%v(isc:iec,jsc:jec,1:npz))
+!      write(*,*) 'ADJ_CO2_SUM DYN_INPUT dt=', myDT, ' umin=', uMin, ' umax=', uMax, &
+!              ' vmin=', vMin, ' vmax=', vMax
+!   endif
     call set_domain(FV_Atm(1)%domain)  ! needed for diagnostic output done in fv_dynamics
     call fv_dynamics(FV_Atm(1)%npx, FV_Atm(1)%npy, FV_Atm(1)%npz, FV_Atm(1)%ncnst, FV_Atm(1)%ng,   &
                      myDT, FV_Atm(1)%flagstruct%consv_te, FV_Atm(1)%flagstruct%fill, FV_Atm(1)%flagstruct%reproduce_sum, kappa,   &
@@ -2053,18 +2053,18 @@ end subroutine FV_Run
   AdjGlobalSum = 0.0_ESMF_KIND_R8
   foundAdjCO2 = .FALSE.
 
-  if (mpp_pe() == mpp_root_pe()) then
-     write(*,*) 'ADJ_CO2_SUM entering ', trim(Label), ' NQ=', STATE%GRID%NQ
-  endif
+!  if (mpp_pe() == mpp_root_pe()) then
+!     write(*,*) 'ADJ_CO2_SUM entering ', trim(Label), ' NQ=', STATE%GRID%NQ
+!  endif
 
-  if (.not. printedTracerNames .and. mpp_pe() == mpp_root_pe()) then
-     write(*,*) 'ADJ_CO2_SUM tracer list begin'
-     do N = 1, STATE%GRID%NQ
-        write(*,*) 'ADJ_CO2_SUM tracer', N, trim(STATE%VARS%TRACER(N)%TNAME)
-     enddo
-     write(*,*) 'ADJ_CO2_SUM tracer list end'
-     printedTracerNames = .TRUE.
-  endif
+!  if (.not. printedTracerNames .and. mpp_pe() == mpp_root_pe()) then
+!     write(*,*) 'ADJ_CO2_SUM tracer list begin'
+!     do N = 1, STATE%GRID%NQ
+!        write(*,*) 'ADJ_CO2_SUM tracer', N, trim(STATE%VARS%TRACER(N)%TNAME)
+!     enddo
+!     write(*,*) 'ADJ_CO2_SUM tracer list end'
+!     printedTracerNames = .TRUE.
+!  endif
 
   do N = 1, STATE%GRID%NQ
      tracerName = trim(STATE%VARS%TRACER(N)%TNAME)
@@ -2097,9 +2097,9 @@ end subroutine FV_Run
                                              cnt=1, rc=STATUS)
   VERIFY_(STATUS)
 
-  if (mpp_pe() == mpp_root_pe()) then
-     write(*,*) 'ADJ_CO2_SUM [' // trim(Label) // '] sum=', AdjGlobalSum
-  endif
+!  if (mpp_pe() == mpp_root_pe()) then
+!     write(*,*) 'ADJ_CO2_SUM [' // trim(Label) // '] sum=', AdjGlobalSum
+!  endif
 
   RETURN_(ESMF_SUCCESS)
 

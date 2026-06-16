@@ -80,7 +80,7 @@ module AdvCore_GridCompMod
       integer     :: Use_Total_Air_Pressure
       logical     :: import_mass_flux_from_extdata = .false.
       logical     :: chk_mass=.false.
-      logical, parameter :: ADVCORE_ADJ_DEBUG = .true.
+      logical, parameter :: ADVCORE_ADJ_DEBUG = .false.
 #ifdef ADJOINT
       logical                    :: isAdjoint=.false.
       character(len=ESMF_MAXSTR) :: modelPhase
