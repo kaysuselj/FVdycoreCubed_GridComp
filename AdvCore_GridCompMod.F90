@@ -1349,7 +1349,9 @@ contains
 
 
 #ifdef ADJOINT
-            if (isAdjoint) then
+            ! Only undo the pre-advection scaling when advection actually ran:
+            ! adjPreAdvSums and the AIRDEN division live inside AdvCore_Advection>0.
+            if (isAdjoint .and. AdvCore_Advection>0) then
                do N=1,NQ
                   if (.not. isAdjointTracer(N)) cycle
                   where (AIRDEN > 0.0_FVPRC)
