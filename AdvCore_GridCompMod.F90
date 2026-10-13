@@ -62,6 +62,9 @@ module AdvCore_GridCompMod
       use fms_mod,         only: fms_init, set_domain, nullify_domain
       use fv_control_mod,  only: fv_init1, fv_init2, fv_end
       use fv_tracer2d_mod, only: offline_tracer_advection
+#ifdef ADJOINT
+      use fv_tracer2d_mod, only: set_adv_adj_method
+#endif
       use fv_mp_mod,       only: is,ie, js,je, is_master, tile
       use fv_grid_utils_mod, only: g_sum
 
@@ -81,9 +84,15 @@ module AdvCore_GridCompMod
       logical     :: import_mass_flux_from_extdata = .false.
       logical     :: chk_mass=.false.
       logical, parameter :: ADVCORE_ADJ_DEBUG = .false.
-#ifdef ADJOINT
+      ! isAdjoint is declared unconditionally so it can be passed explicitly to
+      ! offline_tracer_advection in both ADJOINT and non-ADJOINT builds (stays
+      ! .false. unless MODEL_PHASE=ADJOINT under an ADJOINT build).
       logical                    :: isAdjoint=.false.
+#ifdef ADJOINT
       character(len=ESMF_MAXSTR) :: modelPhase
+      character(len=ESMF_MAXSTR) :: advAdjMethod='reverse_wind_pure'
+      character(len=ESMF_MAXSTR) :: advAdjWeight='airmass'
+      integer                    :: advAdjRescale=1
 #endif
 
       integer,  parameter :: ntiles_per_pe = 1
@@ -465,6 +474,36 @@ contains
            isAdjoint = .true.
       if (isAdjoint) dt = -dt
 
+      ! Advection-adjoint method selector (GCHP.rc). Controls how the tracer
+      ! advection adjoint is computed in adjoint mode:
+      !   reverse_wind_pure (default): negated winds, pure forward operator, NO corrections
+      !   reverse_wind            : reverse_wind_pure + adjoint corrections (copy_corners_ad
+      !                             + boundary stencils)
+      call MAPL_GetResource( MAPL,                         &
+                             advAdjMethod,                 &
+                             'ADV_ADJ_METHOD:',            &
+                             default='reverse_wind_pure',  &
+                             RC=STATUS )
+      _VERIFY(STATUS)
+      call set_adv_adj_method(advAdjMethod)
+      if (MAPL_Am_I_Root() .and. ADVCORE_ADJ_DEBUG) &
+         write(*,*) 'ADVCORE adv_adj_method=', trim(advAdjMethod)
+
+      ! Weight that turns the adjoint variable into a mixing-ratio-like
+      ! quantity around the reversed-wind advection (GCHP.rc):
+      !   airmass (default): dry air mass of the cell (pressure thickness x area),
+      !                      taken at t+dt before the advection and at t after it
+      !   airden           : the air density import on both sides (earlier behaviour)
+      call MAPL_GetResource( MAPL, advAdjWeight, 'ADV_ADJ_WEIGHT:', &
+                             default='airmass', RC=STATUS )
+      _VERIFY(STATUS)
+      ! 1 (default): restore the global sum of the adjoint after the advection
+      call MAPL_GetResource( MAPL, advAdjRescale, 'ADV_ADJ_RESCALE:', &
+                             default=1, RC=STATUS )
+      _VERIFY(STATUS)
+      if (MAPL_Am_I_Root()) write(*,*) 'ADVCORE adv_adj_weight=', trim(advAdjWeight), &
+                                       ' adv_adj_rescale=', advAdjRescale
+
       if (MAPL_Am_I_Root()) then
           if (ADVCORE_ADJ_DEBUG) then
            write(*,*) 'ADVCORE_SETSERVICES_DT ndt=', ndt,               &
@@ -698,6 +737,7 @@ contains
       character(len=ESMF_MAXSTR), allocatable :: biggerlist(:)
       integer, parameter                  :: XLIST_MAX = 60
 
+      logical :: advOn   ! advect in this call?
 #ifdef ADJOINT
 !     reverse time debug info
       integer, parameter                :: DI = 3, DJ = 4, DL = 5
@@ -707,6 +747,9 @@ contains
    real(FVPRC)                    :: rhoUseMin, rhoUseMax
    real(REAL8)                    :: adjLocalSum, adjGlobalSum
    real(REAL8), allocatable       :: adjPreAdvSums(:)
+   logical                        :: adjUseAirMass
+   type(ESMF_Time)                :: adjCurrTime, adjStopTime
+   integer                        :: L
    integer                        :: nAdjScaled
    type(ESMF_VM)                  :: vmRun
 #endif
@@ -820,6 +863,20 @@ contains
                endif
             endif
          endif
+      endif
+#endif
+
+      ! Advect in this call?  The adjoint calls at the end of the window (clock
+      ! at the stop time) do not correspond to any forward step: their winds are
+      ! those of the step after the window.  With physics on the adjoint is still
+      ! zero there; in transport-only runs a built-in seed is already set, so
+      ! advecting would add a step that the forward run does not have.
+      advOn = (AdvCore_Advection > 0)
+#ifdef ADJOINT
+      if (isAdjoint) then
+         call ESMF_ClockGet(CLOCK, currTime=adjCurrTime, stopTime=adjStopTime, rc=STATUS)
+         VERIFY_(STATUS)
+         if (adjCurrTime == adjStopTime) advOn = .false.
       endif
 #endif
 
@@ -1178,13 +1235,13 @@ contains
          ! Run FV3 advection
          !------------------
 #ifdef ADJOINT
-         if (AdvCore_Advection>0) then
+         if (advOn) then
          IF (MAPL_Am_I_Root()) THEN
             WRITE(*,546) dt
 546         FORMAT(' calling offline_tracer_advection with timestep = ', f8.3)
          ENDIF
 #else
-         if (AdvCore_Advection>0) then
+         if (advOn) then
 #endif
 
 #ifdef ADJOINT
@@ -1220,11 +1277,24 @@ contains
                   adjPreAdvSums(N) = adjGlobalSum
                enddo
 
+               ! lambda / (air weight) is advected like a mixing ratio. In adjoint
+               ! mode DryPLE0 holds the pressure edges at t+dt (start of the
+               ! backward step) and DryPLE1 those at t.
+               adjUseAirMass = ( trim(advAdjWeight) == 'airmass' .and. &
+                                 Use_Total_Air_Pressure < 1 )
                do N=1,NQ
                   if (.not. isAdjointTracer(N)) cycle
-                  where (AIRDEN > 0.0_FVPRC)
-                     TRACERS(:,:,:,N) = TRACERS(:,:,:,N) / AIRDEN
-                  end where
+                  if (adjUseAirMass) then
+                     do L=1,LM
+                        TRACERS(:,:,L,N) = TRACERS(:,:,L,N) / &
+                             ( (DryPLE0(:,:,L+1) - DryPLE0(:,:,L)) * &
+                               FV_Atm(1)%gridstruct%area(IS:IE,JS:JE) )
+                     enddo
+                  else
+                     where (AIRDEN > 0.0_FVPRC)
+                        TRACERS(:,:,:,N) = TRACERS(:,:,:,N) / AIRDEN
+                     end where
+                  endif
                enddo
             endif
 #endif
@@ -1286,7 +1356,8 @@ contains
                                               FV_Atm(1)%npz,        &
                                               NAdv,                 &
                                               dt,                   &
-                                              PLEAdv )
+                                              PLEAdv,               &
+                                              isAdjoint=isAdjoint )
             else
                call offline_tracer_advection(TRACERS,              &
                                              DryPLE0,              &
@@ -1307,7 +1378,8 @@ contains
                                              FV_Atm(1)%npz,        &
                                              NAdv,                 &
                                              dt,                   &
-                                             PLEAdv )
+                                             PLEAdv,               &
+                                             isAdjoint=isAdjoint )
             endif
 #ifdef ADJOINT
             if (isAdjoint) FV_Atm(1)%flagstruct%fill = .true.
@@ -1351,12 +1423,20 @@ contains
 #ifdef ADJOINT
             ! Only undo the pre-advection scaling when advection actually ran:
             ! adjPreAdvSums and the AIRDEN division live inside AdvCore_Advection>0.
-            if (isAdjoint .and. AdvCore_Advection>0) then
+            if (isAdjoint .and. advOn) then
                do N=1,NQ
                   if (.not. isAdjointTracer(N)) cycle
-                  where (AIRDEN > 0.0_FVPRC)
-                     TRACERS(:,:,:,N) = TRACERS(:,:,:,N) * AIRDEN
-                  end where
+                  if (adjUseAirMass) then
+                     do L=1,LM
+                        TRACERS(:,:,L,N) = TRACERS(:,:,L,N) * &
+                             ( (DryPLE1(:,:,L+1) - DryPLE1(:,:,L)) * &
+                               FV_Atm(1)%gridstruct%area(IS:IE,JS:JE) )
+                     enddo
+                  else
+                     where (AIRDEN > 0.0_FVPRC)
+                        TRACERS(:,:,:,N) = TRACERS(:,:,:,N) * AIRDEN
+                     end where
+                  endif
                enddo
 
                ! Restore pre-scaling global sum to undo calcScalingFactor applied
@@ -1370,7 +1450,10 @@ contains
                   call MAPL_CommsAllReduceSum(vmRun, sendbuf=adjLocalSum, recvbuf=adjGlobalSum, &
                                              cnt=1, rc=STATUS)
                   VERIFY_(STATUS)
-                  if (adjGlobalSum /= 0.0_REAL8) then
+                  if (MAPL_Am_I_Root() .and. adjGlobalSum /= 0.0_REAL8) &
+                     write(*,'(a,i0,a,es22.14)') ' ADVCORE adjoint global sum before/after advection, tracer ', &
+                           N, ': ', adjPreAdvSums(N) / adjGlobalSum
+                  if (adjGlobalSum /= 0.0_REAL8 .and. advAdjRescale /= 0) then
                      TRACERS(:,:,:,N) = TRACERS(:,:,:,N) * REAL(adjPreAdvSums(N) / adjGlobalSum, FVPRC)
                   endif
                enddo
