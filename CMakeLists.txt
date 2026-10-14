@@ -61,6 +61,12 @@ elseif (FV_PRECISION MATCHES R4R8) # FV is R4 but FMS is R8
   target_compile_definitions (${this} PRIVATE -DSINGLE_FV -DOVERLOAD_R4)
 endif ()
 
+# Ensure AdvCore/FVdycore sources see adjoint-related preprocessors,
+# matching GEOS-Chem build-property behavior.
+target_compile_definitions(${this} PRIVATE
+  $<$<BOOL:${ADJOINT}>:ADJOINT>
+  $<$<BOOL:${REVERSE_OPERATORS}>:REVERSE_OPERATORS>
+)
 
 set (CMAKE_Fortran_FLAGS_RELEASE "${GEOS_Fortran_FLAGS_VECT}")
 

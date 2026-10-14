@@ -79,9 +79,14 @@ module AdvCore_GridCompMod
       integer     :: AdvCore_Advection
       integer     :: Use_Total_Air_Pressure
       logical     :: chk_mass
-#ifdef ADJOINT
+      logical, parameter :: ADVCORE_ADJ_DEBUG = .false.
+      ! .true. only for MODEL_PHASE=ADJOINT in an ADJOINT build
       logical                    :: isAdjoint=.false.
+#ifdef ADJOINT
       character(len=ESMF_MAXSTR) :: modelPhase
+      character(len=ESMF_MAXSTR) :: advAdjMethod='reverse_wind_pure'
+      character(len=ESMF_MAXSTR) :: advAdjWeight='dpadv'
+      integer                    :: advAdjRescale=1
 #endif
 
       integer,  parameter :: ntiles_per_pe = 1
@@ -259,6 +264,17 @@ contains
          VLOCATION  = MAPL_VLocationCenter,           RC=STATUS  )
     VERIFY_(STATUS)
 
+#ifdef ADJOINT
+       call MAPL_AddImportSpec ( gc,                                  &
+          SHORT_NAME = 'ADV_AIRDEN',                                &
+          LONG_NAME  = 'dry_air_density_for_advection',             &
+          UNITS      = 'kg m-3',                                    &
+          PRECISION  = ESMF_KIND_R8,                                &
+          DIMS       = MAPL_DimsHorzVert,                           &
+          VLOCATION  = MAPL_VLocationCenter,           RC=STATUS  )
+       VERIFY_(STATUS)
+#endif
+
   !EXPORT STATE:
      call MAPL_AddExportSpec ( gc,                                  &
           SHORT_NAME = 'AREA',                                      &
@@ -390,6 +406,7 @@ contains
                             label='USE_TOTAL_AIR_PRESSURE_IN_ADVECTION:', &
                             default=0,                                    &
                             RC=STATUS )
+      VERIFY_(STATUS)
 
       ! Check if printing mass for mass conservation check
       ! 1 = true; 0 = false
@@ -490,6 +507,66 @@ contains
       if (trim(ModelPhase) == 'ADJOINT') &
            isAdjoint = .true.
       if (isAdjoint) dt = -dt
+
+      ! The advection adjoint is the unmodified forward scheme run with the
+      ! reversed winds (reverse_wind_pure). The variant with face-edge and
+      ! corner corrections (reverse_wind) was removed on 2026-10-14: it was
+      ! equal inside faces and worse at seams, corners and the polar crossing
+      ! (tests_final P2a, P2c, T4b). ADV_ADJ_METHOD is still read so that run
+      ! directories asking for the removed variant stop here.
+      call MAPL_GetResource( MAPL,                         &
+                             advAdjMethod,                 &
+                             'ADV_ADJ_METHOD:',            &
+                             default='reverse_wind_pure',  &
+                             RC=STATUS )
+      _VERIFY(STATUS)
+      if ( trim(advAdjMethod) /= 'reverse_wind_pure' ) then
+         _ASSERT(.false., 'ADV_ADJ_METHOD: only reverse_wind_pure is supported')
+      endif
+
+      ! Weight that turns the adjoint variable into a mixing-ratio-like
+      ! quantity around the reversed-wind advection (GCHP.rc):
+      !   dpadv (default): divide by the dry air mass at t+dt (pressure thickness x
+      !                    area); multiply by the air mass this reversed step leaves
+      !                    in the cell before the vertical remapping (PLEAdv), plus
+      !                    (mass at t - mass at t+dt) x the divided adjoint. This is the
+      !                    transpose of the forward update q' = (q dp1 + div F) / dpA,
+      !                    which uses the post-advection thickness dpA = dp1 + div(mf),
+      !                    not the met thickness
+      !   airmass        : dry air mass at t+dt before and at t after the advection
+      !                    (behaviour until 2026-10-14; the adjoint gains or loses
+      !                    div(mf)/dp of the cell every step)
+      !   airden         : the air density import on both sides (earlier behaviour)
+      call MAPL_GetResource( MAPL, advAdjWeight, 'ADV_ADJ_WEIGHT:', &
+                             default='dpadv', RC=STATUS )
+      _VERIFY(STATUS)
+      if ( trim(advAdjWeight) /= 'dpadv'   .and. &
+           trim(advAdjWeight) /= 'airmass' .and. &
+           trim(advAdjWeight) /= 'airden' ) then
+         _ASSERT(.false., 'ADV_ADJ_WEIGHT must be dpadv, airmass or airden')
+      endif
+      ! 1 (default): restore the global sum of the adjoint after the advection
+      call MAPL_GetResource( MAPL, advAdjRescale, 'ADV_ADJ_RESCALE:', &
+                             default=1, RC=STATUS )
+      _VERIFY(STATUS)
+      if (MAPL_Am_I_Root()) write(*,*) 'ADVCORE adv_adj_weight=', trim(advAdjWeight), &
+                                       ' adv_adj_rescale=', advAdjRescale
+
+      if (MAPL_Am_I_Root()) then
+          if (ADVCORE_ADJ_DEBUG) then
+           write(*,*) 'ADVCORE_SETSERVICES_DT ndt=', ndt,               &
+              ' model_phase=', trim(modelPhase),               &
+              ' isAdjoint=', isAdjoint, ' final_dt=', dt
+          endif
+      endif
+#else
+      if (MAPL_Am_I_Root()) then
+          if (ADVCORE_ADJ_DEBUG) then
+           write(*,*) 'ADVCORE_SETSERVICES_DT ndt=', ndt,               &
+              ' model_phase=FORWARD (no ADJOINT build)',       &
+              ' isAdjoint=.false. final_dt=', dt
+          endif
+      endif
 #endif
 
       ! Start up FV if AdvCore is running without FV3_DynCoreIsRunning
@@ -646,6 +723,9 @@ contains
       REAL(REAL8), POINTER, DIMENSION(:,:,:)   :: iDryPLE0 ! GCHP dry
       REAL(REAL8), POINTER, DIMENSION(:,:,:)   :: iDryPLE1 ! GCHP dry
       REAL(REAL8), POINTER, DIMENSION(:,:,:)   :: iSPHU0   ! GCHP total
+#ifdef ADJOINT
+      REAL(REAL8), POINTER, DIMENSION(:,:,:)   :: iAIRDEN  ! dry air density
+#endif
 
 ! Exports
       REAL(REAL8), POINTER, DIMENSION(:,:,:)   :: ePLE       ! GCHP export to GEOS-Chem
@@ -669,6 +749,12 @@ contains
       REAL(FVPRC), POINTER, DIMENSION(:,:,:)   :: PLEAdv  ! GCHP total
       REAL(FVPRC), POINTER, DIMENSION(:,:,:)   :: SPHU0   ! GCHP total
       REAL(FVPRC), POINTER, DIMENSION(:,:,:)   :: DELPDRY ! import
+#ifdef ADJOINT
+      REAL(FVPRC), POINTER, DIMENSION(:,:,:)   :: AIRDEN => NULL() ! selected air density
+   logical, allocatable                      :: isAdjointTracer(:)
+   logical                                   :: isAdjField
+   integer                                   :: nAdjointTracers
+#endif
       REAL(FVPRC), POINTER, DIMENSION(:)       :: AK
       REAL(FVPRC), POINTER, DIMENSION(:)       :: BK
       REAL(REAL8), allocatable :: ak_r8(:),bk_r8(:)
@@ -701,17 +787,31 @@ contains
       integer                             :: nqt
       logical                             :: tend
       logical                             :: exclude
+      real(FVPRC)                         :: mfxMin, mfxMax, mfyMin, mfyMax
+      real(FVPRC)                         :: cxMin, cxMax, cyMin, cyMax
       character(len=ESMF_MAXSTR)          :: tmpstring
       character(len=ESMF_MAXSTR)          :: adjustTracerMode
       character(len=ESMF_MAXSTR), allocatable :: xlist(:)
       character(len=ESMF_MAXSTR), allocatable :: biggerlist(:)
       integer, parameter                  :: XLIST_MAX = 60
 
+      logical :: advOn   ! advect in this call?
 #ifdef ADJOINT
 !     reverse time debug info
       integer, parameter                :: DI = 3, DJ = 4, DL = 5
       ! Debug variables
       INTEGER, parameter             :: I_DBG = 6, J_DBG = 5, L_DBG=1
+   real(FVPRC)                    :: rhoDryMin, rhoDryMax
+   real(FVPRC)                    :: rhoUseMin, rhoUseMax
+   real(REAL8)                    :: adjLocalSum, adjGlobalSum
+   real(REAL8), allocatable       :: adjPreAdvSums(:)
+   logical                        :: adjUseAirMass
+   logical                        :: adjUseDpAdv
+   real(FVPRC), allocatable       :: adjMuIn(:,:,:,:)  ! adjoint / air mass before the advection
+   type(ESMF_Time)                :: adjCurrTime, adjStopTime
+   integer                        :: L
+   integer                        :: nAdjScaled
+   type(ESMF_VM)                  :: vmRun
 #endif
 
 ! Get my name and set-up traceback handle
@@ -779,9 +879,66 @@ contains
          VERIFY_(STATUS)
          ALLOCATE( DryPLE0(IM,JM,LM+1) )
          ALLOCATE( DryPLE1(IM,JM,LM+1) )
-         DryPLE0 = iDryPLE0
-         DryPLE1 = iDryPLE1
+#ifdef ADJOINT
+         if (isAdjoint) then
+            DryPLE0 = iDryPLE1
+            DryPLE1 = iDryPLE0
+         else
+#endif
+            DryPLE0 = iDryPLE0
+            DryPLE1 = iDryPLE1
+#ifdef ADJOINT
+         end if
+#endif
       ENDIF
+
+#ifdef ADJOINT
+      if (isAdjoint) then
+         CALL MAPL_GetPointer(IMPORT, iAIRDEN, 'ADV_AIRDEN', ALLOC=.TRUE., RC=STATUS)
+         VERIFY_(STATUS)
+         ALLOCATE( AIRDEN(IM,JM,LM) )
+         AIRDEN = iAIRDEN
+
+         rhoDryMin = minval(AIRDEN)
+         rhoDryMax = maxval(AIRDEN)
+
+         ! For total-air runs, convert dry-air density to moist-air density
+         if ( Use_Total_Air_Pressure > 0 ) then
+            where (1.0_FVPRC - SPHU0 > 0.0_FVPRC)
+               AIRDEN = AIRDEN / (1.0_FVPRC - SPHU0)
+            end where
+         endif
+
+         if (MAPL_Am_I_Root() .and. firstRun) then
+            if (ADVCORE_ADJ_DEBUG) then
+               rhoUseMin = minval(AIRDEN)
+               rhoUseMax = maxval(AIRDEN)
+               if (Use_Total_Air_Pressure > 0) then
+                  write(*,*) 'ADVCORE_DENSITY first adjoint step: ',                 &
+                             'dry_min=', rhoDryMin, ' dry_max=', rhoDryMax,         &
+                             ' moist_used_min=', rhoUseMin, ' moist_used_max=', rhoUseMax
+               else
+                  write(*,*) 'ADVCORE_DENSITY first adjoint step: ',                 &
+                             'dry_min=', rhoDryMin, ' dry_max=', rhoDryMax
+               endif
+            endif
+         endif
+      endif
+#endif
+
+      ! Advect in this call?  The adjoint calls at the end of the window (clock
+      ! at the stop time) do not correspond to any forward step: their winds are
+      ! those of the step after the window.  With physics on the adjoint is still
+      ! zero there; in transport-only runs a built-in seed is already set, so
+      ! advecting would add a step that the forward run does not have.
+      advOn = (AdvCore_Advection > 0)
+#ifdef ADJOINT
+      if (isAdjoint) then
+         call ESMF_ClockGet(CLOCK, currTime=adjCurrTime, stopTime=adjStopTime, rc=STATUS)
+         VERIFY_(STATUS)
+         if (adjCurrTime == adjStopTime) advOn = .false.
+      endif
+#endif
 
       ALLOCATE(  PLE0(IM,JM,LM+1) )
       ALLOCATE(  PLE1(IM,JM,LM+1) )
@@ -791,13 +948,24 @@ contains
       ALLOCATE(    CX(IM,JM,LM  ) )
       ALLOCATE(    CY(IM,JM,LM  ) )
 
-      PLE0   = iPLE0
-      PLE1   = iPLE1 
       PLEAdv = 0.0d0
-      MFX    = iMFX
-      MFY    = iMFY
-      CX     = iCX
-      CY     = iCY
+#ifdef ADJOINT
+      if (isAdjoint) then
+         ! Backward integration: swap pressure-edge fields
+         ! MFX/MFY/CX/CY are already negated upstream by GCHPctmEnv (dt = -dt)
+         PLE0 = iPLE1
+         PLE1 = iPLE0
+      else
+#endif
+         PLE0 = iPLE0
+         PLE1 = iPLE1
+#ifdef ADJOINT
+      end if
+#endif
+      MFX = iMFX
+      MFY = iMFY
+      CX  = iCX
+      CY  = iCY
 
       ! If first run, get import DELPDRY (restart field from GEOS-Chem internal state)
       if ( firstRun ) THEN
@@ -959,6 +1127,12 @@ contains
          VERIFY_(STATUS)
          ALLOCATE( advTracers(NQ),stat=STATUS ) ! Does not include SPHU tracer
          VERIFY_(STATUS)
+#ifdef ADJOINT
+         ALLOCATE( isAdjointTracer(NAdv), stat=STATUS )
+         VERIFY_(STATUS)
+         isAdjointTracer = .false.
+         nAdjointTracers = 0
+#endif
 
          if (NQ /= NQ_SAVED) then
             write(STRING,'(A,I5,A)') "AdvCore is Advecting the following ", nq, " tracers in FV3:"
@@ -977,6 +1151,24 @@ contains
             advTracers(N)%is_r4 = (kind == ESMF_TYPEKIND_R4)   ! Is real*4?
             advTracers(N)%tName = fieldName
 
+
+
+#ifdef ADJOINT
+            isAdjField = .false.
+            if (len_trim(fieldName) >= 4) then
+               isAdjField = (fieldName(len_trim(fieldName)-3:len_trim(fieldName)) == '_ADJ')
+            endif
+            isAdjointTracer(N) = isAdjField
+            if (isAdjField) then
+               nAdjointTracers = nAdjointTracers + 1
+               if (isAdjoint .and. firstRun .and. MAPL_Am_I_Root()) then
+                  if (ADVCORE_ADJ_DEBUG) then
+                     write(*,*) 'ADVCORE_ADJ_TRACER_INDEX idx=', N, ' name=', trim(fieldName)
+                  endif
+               endif
+            endif
+#endif
+
             if (NQ /= NQ_SAVED) then
                call WRITE_PARALLEL( trim(fieldName) )
             endif
@@ -994,6 +1186,30 @@ contains
             end if
 
          end do
+
+#ifdef ADJOINT
+         if (isAdjoint .and. firstRun .and. MAPL_Am_I_Root()) then
+            if (ADVCORE_ADJ_DEBUG) then
+               write(*,*) 'ADVCORE_ADJ_TRACER_COUNT n_adj=', nAdjointTracers, ' n_total=', NQ
+            endif
+         endif
+
+         if (isAdjoint .and. ADVCORE_ADJ_DEBUG) then
+            call ESMF_VMGetCurrent(vmRun, rc=STATUS)
+            VERIFY_(STATUS)
+            do N=1,NQ
+               if (.not. isAdjointTracer(N)) cycle
+               adjLocalSum = SUM( REAL(TRACERS(:,:,:,N), REAL8) )
+               call MAPL_CommsAllReduceSum(vmRun, sendbuf=adjLocalSum, recvbuf=adjGlobalSum, &
+                                           cnt=1, rc=STATUS)
+               VERIFY_(STATUS)
+               if (MAPL_Am_I_Root()) then
+                  write(*,*) 'ADVCORE_ADJ_GLOBAL_SUM stage=after_import idx=', N, &
+                             ' name=', trim(advTracers(N)%tName), ' sum=', adjGlobalSum
+               endif
+            enddo
+         endif
+#endif
 
          !----------------------------------------------------------
          ! Optional pre-scaling debug : Sum area-weighted
@@ -1034,7 +1250,15 @@ contains
          ! If first timestep and delta pressure in the restart file is non-zero,
          ! then scale mixing ratios by ratio of restart file delta pressure to
          ! run-time met delta pressure in order to conserve restart file mass
+#ifdef ADJOINT
+         ! Not in adjoint runs: their first call is at the end of the window,
+         ! where the forward run does not scale. The transpose of the forward
+         ! scaling at the start of the window (multiply the adjoint by the same
+         ! ratio after the last advection adjoint) is not implemented (TODO).
+         if ( firstRun .and. associated(iDELPDRY) .and. .not. isAdjoint ) THEN
+#else
          if ( firstRun .and. associated(iDELPDRY) ) THEN
+#endif
 
             ! Only scale mixing ratios if non-zero delta pressures in the restart file
             if ( sum(iDELPDRY) > 0.d0 ) THEN
@@ -1178,16 +1402,115 @@ contains
          ! Run FV3 advection
          !------------------
 #ifdef ADJOINT
-         if (AdvCore_Advection>0 .and. .not. firstRun) then
+         if (advOn) then
          IF (MAPL_Am_I_Root()) THEN
             WRITE(*,546) dt
 546         FORMAT(' calling offline_tracer_advection with timestep = ', f8.3)
          ENDIF
 #else
-         if (AdvCore_Advection>0) then
+         if (advOn) then
 #endif
 
+#ifdef ADJOINT
+            if (isAdjoint) then
+               if (ADVCORE_ADJ_DEBUG) then
+                  call ESMF_VMGetCurrent(vmRun, rc=STATUS)
+                  VERIFY_(STATUS)
+                  do N=1,NQ
+                     if (.not. isAdjointTracer(N)) cycle
+                     adjLocalSum = SUM( REAL(TRACERS(:,:,:,N), REAL8) )
+                     call MAPL_CommsAllReduceSum(vmRun, sendbuf=adjLocalSum, recvbuf=adjGlobalSum, &
+                                                 cnt=1, rc=STATUS)
+                     VERIFY_(STATUS)
+                     if (MAPL_Am_I_Root()) then
+                        write(*,*) 'ADVCORE_ADJ_GLOBAL_SUM stage=before_div_airden idx=', N, &
+                                   ' name=', trim(advTracers(N)%tName), ' sum=', adjGlobalSum
+                     endif
+                  enddo
+               endif
+
+               ! Save global sum before density scaling for conservation fix
+               call ESMF_VMGetCurrent(vmRun, rc=STATUS)
+               VERIFY_(STATUS)
+               ALLOCATE( adjPreAdvSums(NQ), stat=STATUS )
+               VERIFY_(STATUS)
+               adjPreAdvSums = 0.0_REAL8
+               do N=1,NQ
+                  if (.not. isAdjointTracer(N)) cycle
+                  adjLocalSum = SUM( REAL(TRACERS(:,:,:,N), REAL8) )
+                  call MAPL_CommsAllReduceSum(vmRun, sendbuf=adjLocalSum, recvbuf=adjGlobalSum, &
+                                             cnt=1, rc=STATUS)
+                  VERIFY_(STATUS)
+                  adjPreAdvSums(N) = adjGlobalSum
+               enddo
+
+               ! lambda / (air weight) is advected like a mixing ratio. In adjoint
+               ! mode DryPLE0 holds the pressure edges at t+dt (start of the
+               ! backward step) and DryPLE1 those at t.
+               adjUseAirMass = ( ( trim(advAdjWeight) == 'airmass' .or. &
+                                   trim(advAdjWeight) == 'dpadv' ) .and. &
+                                 Use_Total_Air_Pressure < 1 )
+               adjUseDpAdv   = ( trim(advAdjWeight) == 'dpadv' .and. &
+                                 Use_Total_Air_Pressure < 1 )
+               do N=1,NQ
+                  if (.not. isAdjointTracer(N)) cycle
+                  if (adjUseAirMass) then
+                     do L=1,LM
+                        TRACERS(:,:,L,N) = TRACERS(:,:,L,N) / &
+                             ( (DryPLE0(:,:,L+1) - DryPLE0(:,:,L)) * &
+                               FV_Atm(1)%gridstruct%area(IS:IE,JS:JE) )
+                     enddo
+                  else
+                     where (AIRDEN > 0.0_FVPRC)
+                        TRACERS(:,:,:,N) = TRACERS(:,:,:,N) / AIRDEN
+                     end where
+                  endif
+               enddo
+               if (adjUseDpAdv) then
+                  ALLOCATE( adjMuIn(IM,JM,LM,NQ), stat=STATUS )
+                  VERIFY_(STATUS)
+                  adjMuIn = TRACERS(:,:,:,1:NQ)
+               endif
+            endif
+#endif
+
+            if (ADVCORE_ADJ_DEBUG) then
+               if (MAPL_Am_I_Root()) then
+                  mfxMin = minval(MFX)
+                  mfxMax = maxval(MFX)
+                  mfyMin = minval(MFY)
+                  mfyMax = maxval(MFY)
+                  cxMin  = minval(CX)
+                  cxMax  = maxval(CX)
+                  cyMin  = minval(CY)
+                  cyMax  = maxval(CY)
+#ifdef ADJOINT
+                  if (isAdjoint .and. associated(AIRDEN)) then
+                     rhoDryMin = minval(AIRDEN)
+                     rhoDryMax = maxval(AIRDEN)
+                     write(*,*) 'ADVCORE_INPUT dt=', dt, ' mfxmin=', mfxMin, ' mfxmax=', mfxMax, &
+                                ' mfymin=', mfyMin, ' mfymax=', mfyMax, ' cxmin=', cxMin,        &
+                                ' cxmax=', cxMax, ' cymin=', cyMin, ' cymax=', cyMax,            &
+                                ' airden_min=', rhoDryMin, ' airden_max=', rhoDryMax
+                  else
+                     write(*,*) 'ADVCORE_INPUT dt=', dt, ' mfxmin=', mfxMin, ' mfxmax=', mfxMax, &
+                                ' mfymin=', mfyMin, ' mfymax=', mfyMax, ' cxmin=', cxMin,        &
+                                ' cxmax=', cxMax, ' cymin=', cyMin, ' cymax=', cyMax
+                  endif
+#else
+                  write(*,*) 'ADVCORE_INPUT dt=', dt, ' mfxmin=', mfxMin, ' mfxmax=', mfxMax, &
+                             ' mfymin=', mfyMin, ' mfymax=', mfyMax, ' cxmin=', cxMin,        &
+                             ' cxmax=', cxMax, ' cymin=', cyMin, ' cymax=', cyMax
+#endif
+               endif
+            endif
+
             ! Run offline advection
+#ifdef ADJOINT
+            ! Adjoint tracers can be negative (they are sensitivities, not
+            ! concentrations). Disable fill so fillz does not zero them out.
+            if (isAdjoint) FV_Atm(1)%flagstruct%fill = .false.
+#endif
             if ( Use_Total_Air_Pressure > 0 ) then
                call offline_tracer_advection( TRACERS,              &
                                               PLE0,                 &
@@ -1231,6 +1554,9 @@ contains
                                              dt,                   &
                                              PLEAdv )
             endif
+#ifdef ADJOINT
+            if (isAdjoint) FV_Atm(1)%flagstruct%fill = .true.
+#endif
          endif
 
          ! Compute tracer mass post-advection (proxy). Done for all timesteps.
@@ -1291,6 +1617,73 @@ contains
 
          endif ! chk_mass
 
+#ifdef ADJOINT
+            ! Only undo the pre-advection scaling when advection actually ran:
+            ! adjPreAdvSums and the AIRDEN division live inside AdvCore_Advection>0.
+            if (isAdjoint .and. advOn) then
+               do N=1,NQ
+                  if (.not. isAdjointTracer(N)) cycle
+                  if (adjUseDpAdv) then
+                     do L=1,LM
+                        TRACERS(:,:,L,N) = ( TRACERS(:,:,L,N) * &
+                             (PLEAdv(:,:,L+1) - PLEAdv(:,:,L)) + adjMuIn(:,:,L,N) * &
+                             ( (DryPLE1(:,:,L+1) - DryPLE1(:,:,L)) -            &
+                               (DryPLE0(:,:,L+1) - DryPLE0(:,:,L)) ) ) *        &
+                             FV_Atm(1)%gridstruct%area(IS:IE,JS:JE)
+                     enddo
+                  elseif (adjUseAirMass) then
+                     do L=1,LM
+                        TRACERS(:,:,L,N) = TRACERS(:,:,L,N) * &
+                             ( (DryPLE1(:,:,L+1) - DryPLE1(:,:,L)) * &
+                               FV_Atm(1)%gridstruct%area(IS:IE,JS:JE) )
+                     enddo
+                  else
+                     where (AIRDEN > 0.0_FVPRC)
+                        TRACERS(:,:,:,N) = TRACERS(:,:,:,N) * AIRDEN
+                     end where
+                  endif
+               enddo
+               if (allocated(adjMuIn)) DEALLOCATE( adjMuIn )
+
+               ! Restore pre-scaling global sum to undo calcScalingFactor applied
+               ! inside offline_tracer_advection to adjoint tracers
+               call ESMF_VMGetCurrent(vmRun, rc=STATUS)
+               VERIFY_(STATUS)
+               do N=1,NQ
+                  if (.not. isAdjointTracer(N)) cycle
+                  if (adjPreAdvSums(N) == 0.0_REAL8) cycle
+                  adjLocalSum = SUM( REAL(TRACERS(:,:,:,N), REAL8) )
+                  call MAPL_CommsAllReduceSum(vmRun, sendbuf=adjLocalSum, recvbuf=adjGlobalSum, &
+                                             cnt=1, rc=STATUS)
+                  VERIFY_(STATUS)
+                  if (MAPL_Am_I_Root() .and. adjGlobalSum /= 0.0_REAL8) &
+                     write(*,'(a,i0,a,es22.14)') ' ADVCORE adjoint global sum before/after advection, tracer ', &
+                           N, ': ', adjPreAdvSums(N) / adjGlobalSum
+                  if (adjGlobalSum /= 0.0_REAL8 .and. advAdjRescale /= 0) then
+                     TRACERS(:,:,:,N) = TRACERS(:,:,:,N) * REAL(adjPreAdvSums(N) / adjGlobalSum, FVPRC)
+                  endif
+               enddo
+               DEALLOCATE( adjPreAdvSums, stat=STATUS )
+               VERIFY_(STATUS)
+
+               if (ADVCORE_ADJ_DEBUG) then
+                  call ESMF_VMGetCurrent(vmRun, rc=STATUS)
+                  VERIFY_(STATUS)
+                  do N=1,NQ
+                     if (.not. isAdjointTracer(N)) cycle
+                     adjLocalSum = SUM( REAL(TRACERS(:,:,:,N), REAL8) )
+                     call MAPL_CommsAllReduceSum(vmRun, sendbuf=adjLocalSum, recvbuf=adjGlobalSum, &
+                                                 cnt=1, rc=STATUS)
+                     VERIFY_(STATUS)
+                     if (MAPL_Am_I_Root()) then
+                        write(*,*) 'ADVCORE_ADJ_GLOBAL_SUM stage=after_mul_airden idx=', N, &
+                                   ' name=', trim(advTracers(N)%tName), ' sum=', adjGlobalSum
+                     endif
+                  enddo
+               endif
+            endif
+#endif
+
          ! If using total air pressure then convert all tracers from kg/kg total
          ! to kg/kg dry for use in GEOS-Chem. Use the post-advection specific
          ! humidity tracer for the conversion.
@@ -1328,6 +1721,10 @@ contains
          !----------------------------------------------------------------
          DEALLOCATE( TRACERS,stat=STATUS )
          VERIFY_(STATUS)
+#ifdef ADJOINT
+         DEALLOCATE( isAdjointTracer, stat=STATUS )
+         VERIFY_(STATUS)
+#endif
 
       end if ! NQ > 0
 
@@ -1374,6 +1771,12 @@ contains
          DEALLOCATE( DryPLE0 )
          DEALLOCATE( DryPLE1 )
       endif
+
+#ifdef ADJOINT
+      if (associated(AIRDEN)) then
+         DEALLOCATE( AIRDEN )
+      endif
+#endif
 
       call MAPL_TimerOff(MAPL,"RUN")
       call MAPL_TimerOff(MAPL,"TOTAL")
