@@ -62,9 +62,6 @@ module AdvCore_GridCompMod
       use fms_mod,         only: fms_init, set_domain, nullify_domain
       use fv_control_mod,  only: fv_init1, fv_init2, fv_end
       use fv_tracer2d_mod, only: offline_tracer_advection
-#ifdef ADJOINT
-      use fv_tracer2d_mod, only: set_adv_adj_method
-#endif
       use fv_mp_mod,       only: is,ie, js,je, is_master, tile
       use fv_grid_utils_mod, only: g_sum
 
@@ -84,9 +81,7 @@ module AdvCore_GridCompMod
       logical     :: import_mass_flux_from_extdata = .false.
       logical     :: chk_mass=.false.
       logical, parameter :: ADVCORE_ADJ_DEBUG = .false.
-      ! isAdjoint is declared unconditionally so it can be passed explicitly to
-      ! offline_tracer_advection in both ADJOINT and non-ADJOINT builds (stays
-      ! .false. unless MODEL_PHASE=ADJOINT under an ADJOINT build).
+      ! .true. only for MODEL_PHASE=ADJOINT in an ADJOINT build
       logical                    :: isAdjoint=.false.
 #ifdef ADJOINT
       character(len=ESMF_MAXSTR) :: modelPhase
@@ -474,20 +469,21 @@ contains
            isAdjoint = .true.
       if (isAdjoint) dt = -dt
 
-      ! Advection-adjoint method selector (GCHP.rc). Controls how the tracer
-      ! advection adjoint is computed in adjoint mode:
-      !   reverse_wind_pure (default): negated winds, pure forward operator, NO corrections
-      !   reverse_wind            : reverse_wind_pure + adjoint corrections (copy_corners_ad
-      !                             + boundary stencils)
+      ! The advection adjoint is the unmodified forward scheme run with the
+      ! reversed winds (reverse_wind_pure). The variant with face-edge and
+      ! corner corrections (reverse_wind) was removed on 2026-10-14: it was
+      ! equal inside faces and worse at seams, corners and the polar crossing
+      ! (tests_final P2a, P2c, T4b). ADV_ADJ_METHOD is still read so that run
+      ! directories asking for the removed variant stop here.
       call MAPL_GetResource( MAPL,                         &
                              advAdjMethod,                 &
                              'ADV_ADJ_METHOD:',            &
                              default='reverse_wind_pure',  &
                              RC=STATUS )
       _VERIFY(STATUS)
-      call set_adv_adj_method(advAdjMethod)
-      if (MAPL_Am_I_Root() .and. ADVCORE_ADJ_DEBUG) &
-         write(*,*) 'ADVCORE adv_adj_method=', trim(advAdjMethod)
+      if ( trim(advAdjMethod) /= 'reverse_wind_pure' ) then
+         _ASSERT(.false., 'ADV_ADJ_METHOD: only reverse_wind_pure is supported')
+      endif
 
       ! Weight that turns the adjoint variable into a mixing-ratio-like
       ! quantity around the reversed-wind advection (GCHP.rc):
@@ -1379,8 +1375,7 @@ contains
                                               FV_Atm(1)%npz,        &
                                               NAdv,                 &
                                               dt,                   &
-                                              PLEAdv,               &
-                                              isAdjoint=isAdjoint )
+                                              PLEAdv )
             else
                call offline_tracer_advection(TRACERS,              &
                                              DryPLE0,              &
@@ -1401,8 +1396,7 @@ contains
                                              FV_Atm(1)%npz,        &
                                              NAdv,                 &
                                              dt,                   &
-                                             PLEAdv,               &
-                                             isAdjoint=isAdjoint )
+                                             PLEAdv )
             endif
 #ifdef ADJOINT
             if (isAdjoint) FV_Atm(1)%flagstruct%fill = .true.
