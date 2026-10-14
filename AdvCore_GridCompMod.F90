@@ -91,7 +91,7 @@ module AdvCore_GridCompMod
 #ifdef ADJOINT
       character(len=ESMF_MAXSTR) :: modelPhase
       character(len=ESMF_MAXSTR) :: advAdjMethod='reverse_wind_pure'
-      character(len=ESMF_MAXSTR) :: advAdjWeight='airmass'
+      character(len=ESMF_MAXSTR) :: advAdjWeight='dpadv'
       integer                    :: advAdjRescale=1
 #endif
 
@@ -491,12 +491,25 @@ contains
 
       ! Weight that turns the adjoint variable into a mixing-ratio-like
       ! quantity around the reversed-wind advection (GCHP.rc):
-      !   airmass (default): dry air mass of the cell (pressure thickness x area),
-      !                      taken at t+dt before the advection and at t after it
-      !   airden           : the air density import on both sides (earlier behaviour)
+      !   dpadv (default): divide by the dry air mass at t+dt (pressure thickness x
+      !                    area); multiply by the air mass this reversed step leaves
+      !                    in the cell before the vertical remapping (PLEAdv), plus
+      !                    (mass at t - mass at t+dt) x the divided adjoint. This is the
+      !                    transpose of the forward update q' = (q dp1 + div F) / dpA,
+      !                    which uses the post-advection thickness dpA = dp1 + div(mf),
+      !                    not the met thickness
+      !   airmass        : dry air mass at t+dt before and at t after the advection
+      !                    (behaviour until 2026-10-14; the adjoint gains or loses
+      !                    div(mf)/dp of the cell every step)
+      !   airden         : the air density import on both sides (earlier behaviour)
       call MAPL_GetResource( MAPL, advAdjWeight, 'ADV_ADJ_WEIGHT:', &
-                             default='airmass', RC=STATUS )
+                             default='dpadv', RC=STATUS )
       _VERIFY(STATUS)
+      if ( trim(advAdjWeight) /= 'dpadv'   .and. &
+           trim(advAdjWeight) /= 'airmass' .and. &
+           trim(advAdjWeight) /= 'airden' ) then
+         _ASSERT(.false., 'ADV_ADJ_WEIGHT must be dpadv, airmass or airden')
+      endif
       ! 1 (default): restore the global sum of the adjoint after the advection
       call MAPL_GetResource( MAPL, advAdjRescale, 'ADV_ADJ_RESCALE:', &
                              default=1, RC=STATUS )
@@ -748,6 +761,8 @@ contains
    real(REAL8)                    :: adjLocalSum, adjGlobalSum
    real(REAL8), allocatable       :: adjPreAdvSums(:)
    logical                        :: adjUseAirMass
+   logical                        :: adjUseDpAdv
+   real(FVPRC), allocatable       :: adjMuIn(:,:,:,:)  ! adjoint / air mass before the advection
    type(ESMF_Time)                :: adjCurrTime, adjStopTime
    integer                        :: L
    integer                        :: nAdjScaled
@@ -1280,7 +1295,10 @@ contains
                ! lambda / (air weight) is advected like a mixing ratio. In adjoint
                ! mode DryPLE0 holds the pressure edges at t+dt (start of the
                ! backward step) and DryPLE1 those at t.
-               adjUseAirMass = ( trim(advAdjWeight) == 'airmass' .and. &
+               adjUseAirMass = ( ( trim(advAdjWeight) == 'airmass' .or. &
+                                   trim(advAdjWeight) == 'dpadv' ) .and. &
+                                 Use_Total_Air_Pressure < 1 )
+               adjUseDpAdv   = ( trim(advAdjWeight) == 'dpadv' .and. &
                                  Use_Total_Air_Pressure < 1 )
                do N=1,NQ
                   if (.not. isAdjointTracer(N)) cycle
@@ -1296,6 +1314,11 @@ contains
                      end where
                   endif
                enddo
+               if (adjUseDpAdv) then
+                  ALLOCATE( adjMuIn(IM,JM,LM,NQ), stat=STATUS )
+                  VERIFY_(STATUS)
+                  adjMuIn = TRACERS(:,:,:,1:NQ)
+               endif
             endif
 #endif
 
@@ -1426,7 +1449,15 @@ contains
             if (isAdjoint .and. advOn) then
                do N=1,NQ
                   if (.not. isAdjointTracer(N)) cycle
-                  if (adjUseAirMass) then
+                  if (adjUseDpAdv) then
+                     do L=1,LM
+                        TRACERS(:,:,L,N) = ( TRACERS(:,:,L,N) * &
+                             (PLEAdv(:,:,L+1) - PLEAdv(:,:,L)) + adjMuIn(:,:,L,N) * &
+                             ( (DryPLE1(:,:,L+1) - DryPLE1(:,:,L)) -            &
+                               (DryPLE0(:,:,L+1) - DryPLE0(:,:,L)) ) ) *        &
+                             FV_Atm(1)%gridstruct%area(IS:IE,JS:JE)
+                     enddo
+                  elseif (adjUseAirMass) then
                      do L=1,LM
                         TRACERS(:,:,L,N) = TRACERS(:,:,L,N) * &
                              ( (DryPLE1(:,:,L+1) - DryPLE1(:,:,L)) * &
@@ -1438,6 +1469,7 @@ contains
                      end where
                   endif
                enddo
+               if (allocated(adjMuIn)) DEALLOCATE( adjMuIn )
 
                ! Restore pre-scaling global sum to undo calcScalingFactor applied
                ! inside offline_tracer_advection to adjoint tracers
