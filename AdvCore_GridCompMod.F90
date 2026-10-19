@@ -64,6 +64,10 @@ module AdvCore_GridCompMod
       use fv_tracer2d_mod, only: offline_tracer_advection
       use fv_mp_mod,       only: is,ie, js,je, is_master, tile
       use fv_grid_utils_mod, only: g_sum
+#ifdef ADJOINT
+      ! discrete_linear: TAF-generated exact adjoint of the step (fvdycore/model/adjoint)
+      use adv_adj_discrete_mod, only: adv_adj_discrete_init, adv_adj_discrete_adj, adv_adj_discrete_fwd
+#endif
 
       USE FV_StateMod,     only: AdvCoreTracers => T_TRACERS
       USE FV_StateMod,     only: FV_Atm
@@ -87,6 +91,11 @@ module AdvCore_GridCompMod
       character(len=ESMF_MAXSTR) :: advAdjMethod='reverse_wind_pure'
       character(len=ESMF_MAXSTR) :: advAdjWeight='dpadv'
       integer                    :: advAdjRescale=1
+      ! ADV_ADJ_METHOD: discrete_linear (fvdycore/model/adjoint, gchp/adv_adj_discrete.F90)
+      logical                    :: advAdjDiscrete=.false.
+      character(len=ESMF_MAXSTR) :: advAdjDiscFixer='none'
+      integer                    :: advAdjDiscCheck=0
+      logical                    :: advAdjDiscReady=.false.
 #endif
 
       integer,  parameter :: ntiles_per_pe = 1
@@ -520,9 +529,30 @@ contains
                              default='reverse_wind_pure',  &
                              RC=STATUS )
       _VERIFY(STATUS)
-      if ( trim(advAdjMethod) /= 'reverse_wind_pure' ) then
-         _ASSERT(.false., 'ADV_ADJ_METHOD: only reverse_wind_pure is supported')
+      ! discrete_linear (added 2026-10-19): the exact transpose of the forward step, TAF-generated
+      ! from fv_tracer2d / tp_core / fv_mapz (fvdycore/model/adjoint). Exact for a linear
+      ! forward scheme (hord_tr = 2, kord_tr = 17, as in run_P2lin.pbs; the forward run must use
+      ! the same scheme). It acts on the adjoint directly: no air-mass weighting, no rescaling.
+      if ( trim(advAdjMethod) /= 'reverse_wind_pure' .and. &
+           trim(advAdjMethod) /= 'discrete_linear' ) then
+         _ASSERT(.false., 'ADV_ADJ_METHOD must be reverse_wind_pure or discrete_linear')
       endif
+      advAdjDiscrete = ( trim(advAdjMethod) == 'discrete_linear' )
+      ! mass fixer in the discrete adjoint: none (factor 1); linearized needs the q before the
+      ! forward advection from the checkpoint (not wired yet)
+      call MAPL_GetResource( MAPL, advAdjDiscFixer, 'ADV_ADJ_DISCRETE_FIXER:', &
+                             default='none', RC=STATUS )
+      _VERIFY(STATUS)
+      if ( advAdjDiscrete .and. trim(advAdjDiscFixer) /= 'none' ) then
+         _ASSERT(.false., 'ADV_ADJ_DISCRETE_FIXER: only none is wired so far')
+      endif
+      ! 1: every step, also run the forward step of a test field with offline_tracer_advection
+      !    and with the discrete code on the same inputs, and print the difference
+      call MAPL_GetResource( MAPL, advAdjDiscCheck, 'ADV_ADJ_DISCRETE_CHECK:', &
+                             default=0, RC=STATUS )
+      _VERIFY(STATUS)
+      if (MAPL_Am_I_Root()) write(*,*) 'ADVCORE adv_adj_method=', trim(advAdjMethod), &
+                                       ' discrete fixer=', trim(advAdjDiscFixer), ' check=', advAdjDiscCheck
 
       ! Weight that turns the adjoint variable into a mixing-ratio-like
       ! quantity around the reversed-wind advection (GCHP.rc):
@@ -752,6 +782,11 @@ contains
 #ifdef ADJOINT
       REAL(FVPRC), POINTER, DIMENSION(:,:,:)   :: AIRDEN => NULL() ! selected air density
    logical, allocatable                      :: isAdjointTracer(:)
+      ! discrete_linear: inputs of the forward step, adjoint of one tracer, check fields
+      REAL(FVPRC), ALLOCATABLE :: adjMfxF(:,:,:), adjMfyF(:,:,:), adjCxF(:,:,:), adjCyF(:,:,:)
+      REAL(FVPRC), ALLOCATABLE :: adjPle0F(:,:,:), adjPle1F(:,:,:), adjLam(:,:,:)
+      REAL(FVPRC), ALLOCATABLE :: adjQt4(:,:,:,:), adjQt(:,:,:), adjPleT(:,:,:), adjPleAdvT(:,:,:)
+      REAL(REAL8)              :: adjChkLoc, adjChkGlob
    logical                                   :: isAdjField
    integer                                   :: nAdjointTracers
 #endif
@@ -1412,7 +1447,7 @@ contains
 #endif
 
 #ifdef ADJOINT
-            if (isAdjoint) then
+            if (isAdjoint .and. .not. advAdjDiscrete) then
                if (ADVCORE_ADJ_DEBUG) then
                   call ESMF_VMGetCurrent(vmRun, rc=STATUS)
                   VERIFY_(STATUS)
@@ -1510,6 +1545,62 @@ contains
             ! Adjoint tracers can be negative (they are sensitivities, not
             ! concentrations). Disable fill so fillz does not zero them out.
             if (isAdjoint) FV_Atm(1)%flagstruct%fill = .false.
+            if (isAdjoint .and. advAdjDiscrete) then
+               ! ---- discrete_linear: adjoint of the forward step, tracer by tracer
+               if (.not. advAdjDiscReady) then
+                  call adv_adj_discrete_init(FV_Atm(1)%gridstruct, FV_Atm(1)%flagstruct, FV_Atm(1)%bd, &
+                                             FV_Atm(1)%domain, FV_Atm(1)%tile, FV_Atm(1)%npx,         &
+                                             FV_Atm(1)%npy, FV_Atm(1)%npz, AK, BK, PTOP, abs(dt))
+                  advAdjDiscReady = .true.
+               endif
+               ! Inputs of the FORWARD step that this adjoint step reverses. GCHPctmEnv gives the
+               ! reverse run the negated forward fluxes (ADV_ADJ_MASSFLUX: forward), and the swap
+               ! above makes DryPLE0 / PLE0 the edges at t+dt and DryPLE1 / PLE1 those at t.
+               ! To be confirmed on Pleiades with tools/check_conventions.py and
+               ! ADV_ADJ_DISCRETE_CHECK (HANDOFF_PLEIADES.md).
+               ALLOCATE( adjMfxF(IM,JM,LM), adjMfyF(IM,JM,LM), adjCxF(IM,JM,LM), adjCyF(IM,JM,LM) )
+               ALLOCATE( adjPle0F(IM,JM,LM+1), adjPle1F(IM,JM,LM+1), adjLam(IM,JM,LM) )
+               adjMfxF = -MFX; adjMfyF = -MFY; adjCxF = -CX; adjCyF = -CY
+               if ( Use_Total_Air_Pressure > 0 ) then
+                  adjPle0F = PLE1; adjPle1F = PLE0
+               else
+                  adjPle0F = DryPLE1; adjPle1F = DryPLE0
+               endif
+               do N=1,NQ
+                  if (.not. isAdjointTracer(N)) cycle
+                  adjLam = TRACERS(:,:,:,N)
+                  call adv_adj_discrete_adj(adjLam, adjMfxF, adjMfyF, adjCxF, adjCyF, &
+                                            adjPle0F, adjPle1F, trim(advAdjDiscFixer))
+                  TRACERS(:,:,:,N) = adjLam
+               enddo
+               if (advAdjDiscCheck > 0) then
+                  ! the same forward step by offline_tracer_advection and by the discrete code;
+                  ! they must agree to round-off (checks the grid copy and the build, not the
+                  ! convention, which both get from here)
+                  ALLOCATE( adjQt4(IM,JM,LM,1), adjQt(IM,JM,LM), adjPleT(IM,JM,LM+1), adjPleAdvT(IM,JM,LM+1) )
+                  do L=1,LM
+                     adjQt(:,:,L) = 4.0e-4_FVPRC * (1.0_FVPRC + 0.01_FVPRC*real(L,FVPRC)/real(LM,FVPRC))
+                  enddo
+                  adjQt(:,:,LM/2) = adjQt(:,:,LM/2) * (1.0_FVPRC + 0.1_FVPRC*FV_Atm(1)%gridstruct%area(IS:IE,JS:JE) &
+                                    / maxval(FV_Atm(1)%gridstruct%area(IS:IE,JS:JE)))
+                  adjQt4(:,:,:,1) = adjQt
+                  adjPleT = adjPle1F
+                  call offline_tracer_advection(adjQt4, adjPle0F, adjPleT, adjMfxF, adjMfyF, adjCxF, adjCyF, &
+                                                FV_Atm(1)%gridstruct, FV_Atm(1)%flagstruct, FV_Atm(1)%bd,  &
+                                                FV_Atm(1)%domain, AK, BK, PTOP, FV_Atm(1)%npx,             &
+                                                FV_Atm(1)%npy, FV_Atm(1)%npz, 1, abs(dt), adjPleAdvT)
+                  call adv_adj_discrete_fwd(adjQt, adjMfxF, adjMfyF, adjCxF, adjCyF, adjPle0F, adjPle1F, 'full')
+                  call ESMF_VMGetCurrent(vmRun, rc=STATUS)
+                  VERIFY_(STATUS)
+                  adjChkLoc = maxval(abs(REAL(adjQt - adjQt4(:,:,:,1), REAL8)))
+                  call MAPL_CommsAllReduceMax(vmRun, sendbuf=adjChkLoc, recvbuf=adjChkGlob, cnt=1, rc=STATUS)
+                  VERIFY_(STATUS)
+                  if (MAPL_Am_I_Root()) write(*,'(a,es10.2)') &
+                     ' ADVCORE discrete_linear check: max |offline_tracer_advection - discrete forward| =', adjChkGlob
+                  DEALLOCATE( adjQt4, adjQt, adjPleT, adjPleAdvT )
+               endif
+               DEALLOCATE( adjMfxF, adjMfyF, adjCxF, adjCyF, adjPle0F, adjPle1F, adjLam )
+            else
 #endif
             if ( Use_Total_Air_Pressure > 0 ) then
                call offline_tracer_advection( TRACERS,              &
@@ -1555,6 +1646,7 @@ contains
                                              PLEAdv )
             endif
 #ifdef ADJOINT
+            endif   ! discrete_linear
             if (isAdjoint) FV_Atm(1)%flagstruct%fill = .true.
 #endif
          endif
@@ -1620,7 +1712,7 @@ contains
 #ifdef ADJOINT
             ! Only undo the pre-advection scaling when advection actually ran:
             ! adjPreAdvSums and the AIRDEN division live inside AdvCore_Advection>0.
-            if (isAdjoint .and. advOn) then
+            if (isAdjoint .and. advOn .and. .not. advAdjDiscrete) then
                do N=1,NQ
                   if (.not. isAdjointTracer(N)) cycle
                   if (adjUseDpAdv) then
