@@ -96,6 +96,8 @@ module AdvCore_GridCompMod
       character(len=ESMF_MAXSTR) :: advAdjDiscFixer='none'
       integer                    :: advAdjDiscCheck=0
       logical                    :: advAdjDiscReady=.false.
+      ! ADV_ADJ_DISCRETE_CHECK 2: forward trajectory of the previous adjoint call (q at T+dt)
+      REAL(FVPRC), ALLOCATABLE, SAVE :: adjQprev(:,:,:)
 #endif
 
       integer,  parameter :: ntiles_per_pe = 1
@@ -794,7 +796,7 @@ contains
       integer                  :: NF, lenAdj
       REAL(FVPRC), ALLOCATABLE :: adjPle0F(:,:,:), adjPle1F(:,:,:), adjLam(:,:,:)
       REAL(FVPRC), ALLOCATABLE :: adjQt4(:,:,:,:), adjQt(:,:,:), adjPleT(:,:,:), adjPleAdvT(:,:,:)
-      REAL(REAL8)              :: adjChkLoc, adjChkGlob
+      REAL(REAL8)              :: adjChkLoc, adjChkGlob, adjChkRef
    logical                                   :: isAdjField
    integer                                   :: nAdjointTracers
 #endif
@@ -1605,11 +1607,27 @@ contains
                   ! they must agree to round-off (checks the grid copy and the build, not the
                   ! convention, which both get from here)
                   ALLOCATE( adjQt4(IM,JM,LM,1), adjQt(IM,JM,LM), adjPleT(IM,JM,LM+1), adjPleAdvT(IM,JM,LM+1) )
-                  do L=1,LM
-                     adjQt(:,:,L) = 4.0e-4_FVPRC * (1.0_FVPRC + 0.01_FVPRC*real(L,FVPRC)/real(LM,FVPRC))
-                  enddo
-                  adjQt(:,:,LM/2) = adjQt(:,:,LM/2) * (1.0_FVPRC + 0.1_FVPRC*FV_Atm(1)%gridstruct%area(IS:IE,JS:JE) &
-                                    / maxval(FV_Atm(1)%gridstruct%area(IS:IE,JS:JE)))
+                  NF = 0
+                  if (advAdjDiscCheck == 2) then
+                     ! real field: the forward trajectory q(T) of the first adjoint tracer (its forward partner)
+                     do N=1,NQ
+                        if (.not. isAdjointTracer(N)) cycle
+                        lenAdj = len_trim(advTracers(N)%tName)
+                        do L=1,NQ
+                           if ( trim(advTracers(L)%tName) == advTracers(N)%tName(1:lenAdj-4) ) NF = L
+                        enddo
+                        exit
+                     enddo
+                  endif
+                  if (NF > 0) then
+                     adjQt = TRACERS(:,:,:,NF)
+                  else
+                     do L=1,LM
+                        adjQt(:,:,L) = 4.0e-4_FVPRC * (1.0_FVPRC + 0.01_FVPRC*real(L,FVPRC)/real(LM,FVPRC))
+                     enddo
+                     adjQt(:,:,LM/2) = adjQt(:,:,LM/2) * (1.0_FVPRC + 0.1_FVPRC*FV_Atm(1)%gridstruct%area(IS:IE,JS:JE) &
+                                       / maxval(FV_Atm(1)%gridstruct%area(IS:IE,JS:JE)))
+                  endif
                   adjQt4(:,:,:,1) = adjQt
                   adjPleT = adjPle1F
                   call offline_tracer_advection(adjQt4, adjPle0F, adjPleT, adjMfxF, adjMfyF, adjCxF, adjCyF, &
@@ -1624,6 +1642,24 @@ contains
                   VERIFY_(STATUS)
                   if (MAPL_Am_I_Root()) write(*,'(a,es10.2)') &
                      ' ADVCORE discrete_linear check: max |offline_tracer_advection - discrete forward| =', adjChkGlob
+                  if (NF > 0) then
+                     ! trajectory alignment: one forward step of q(T) must give the q(T+dt) of the previous adjoint
+                     ! call (advection-only runs). Reference: |q(T) - q(T+dt)| (one step of change).
+                     if (allocated(adjQprev)) then
+                        adjChkLoc = maxval(abs(REAL(adjQt - adjQprev, REAL8)))
+                        call MAPL_CommsAllReduceMax(vmRun, sendbuf=adjChkLoc, recvbuf=adjChkGlob, cnt=1, rc=STATUS)
+                        VERIFY_(STATUS)
+                        adjChkLoc = maxval(abs(REAL(TRACERS(:,:,:,NF) - adjQprev, REAL8)))
+                        call MAPL_CommsAllReduceMax(vmRun, sendbuf=adjChkLoc, recvbuf=adjChkRef, cnt=1, rc=STATUS)
+                        VERIFY_(STATUS)
+                        if (MAPL_Am_I_Root()) write(*,'(a,es10.2,a,es10.2)') &
+                           ' ADVCORE trajectory check: max |fwd(q_traj(T)) - q_traj(T+dt)| =', adjChkGlob, &
+                           '   reference max |q_traj(T) - q_traj(T+dt)| =', adjChkRef
+                     else
+                        allocate(adjQprev(IM,JM,LM))
+                     endif
+                     adjQprev = TRACERS(:,:,:,NF)
+                  endif
                   DEALLOCATE( adjQt4, adjQt, adjPleT, adjPleAdvT )
                endif
                DEALLOCATE( adjMfxF, adjMfyF, adjCxF, adjCyF, adjPle0F, adjPle1F, adjLam )
