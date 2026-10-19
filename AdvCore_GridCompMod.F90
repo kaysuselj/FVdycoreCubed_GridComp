@@ -538,13 +538,19 @@ contains
          _ASSERT(.false., 'ADV_ADJ_METHOD must be reverse_wind_pure or discrete_linear')
       endif
       advAdjDiscrete = ( trim(advAdjMethod) == 'discrete_linear' )
-      ! mass fixer in the discrete adjoint: none (factor 1); linearized needs the q before the
-      ! forward advection from the checkpoint (not wired yet)
+      ! mass fixer in the discrete adjoint:
+      !   none       : factor 1 (the forward's s(q) is not differentiated)
+      !   linearized : adjoint of q*s(q), with s(q) linearized about the forward q of the step.
+      !                That q is the forward partner of the adjoint tracer (SPC_X for SPC_X_ADJ) in
+      !                TRADV: GEOS-Chem refreshes it from gcadj_internal_checkpoint.<T> before
+      !                AdvCore reverses step T -> T+dt, and that checkpoint holds q(T), the field
+      !                before the forward advection of the step.
       call MAPL_GetResource( MAPL, advAdjDiscFixer, 'ADV_ADJ_DISCRETE_FIXER:', &
                              default='none', RC=STATUS )
       _VERIFY(STATUS)
-      if ( advAdjDiscrete .and. trim(advAdjDiscFixer) /= 'none' ) then
-         _ASSERT(.false., 'ADV_ADJ_DISCRETE_FIXER: only none is wired so far')
+      if ( advAdjDiscrete .and. trim(advAdjDiscFixer) /= 'none' .and. &
+           trim(advAdjDiscFixer) /= 'linearized' ) then
+         _ASSERT(.false., 'ADV_ADJ_DISCRETE_FIXER must be none or linearized')
       endif
       ! 1: every step, also run the forward step of a test field with offline_tracer_advection
       !    and with the discrete code on the same inputs, and print the difference
@@ -784,6 +790,8 @@ contains
    logical, allocatable                      :: isAdjointTracer(:)
       ! discrete_linear: inputs of the forward step, adjoint of one tracer, check fields
       REAL(FVPRC), ALLOCATABLE :: adjMfxF(:,:,:), adjMfyF(:,:,:), adjCxF(:,:,:), adjCyF(:,:,:)
+      REAL(FVPRC), ALLOCATABLE :: adjQtraj(:,:,:)
+      integer                  :: NF, lenAdj
       REAL(FVPRC), ALLOCATABLE :: adjPle0F(:,:,:), adjPle1F(:,:,:), adjLam(:,:,:)
       REAL(FVPRC), ALLOCATABLE :: adjQt4(:,:,:,:), adjQt(:,:,:), adjPleT(:,:,:), adjPleAdvT(:,:,:)
       REAL(REAL8)              :: adjChkLoc, adjChkGlob
@@ -1569,8 +1577,27 @@ contains
                do N=1,NQ
                   if (.not. isAdjointTracer(N)) cycle
                   adjLam = TRACERS(:,:,:,N)
-                  call adv_adj_discrete_adj(adjLam, adjMfxF, adjMfyF, adjCxF, adjCyF, &
-                                            adjPle0F, adjPle1F, trim(advAdjDiscFixer))
+                  if ( trim(advAdjDiscFixer) == 'linearized' ) then
+                     ! forward partner: same name without the trailing '_ADJ'
+                     lenAdj = len_trim(advTracers(N)%tName)
+                     NF = 0
+                     do L=1,NQ
+                        if ( trim(advTracers(L)%tName) == advTracers(N)%tName(1:lenAdj-4) ) NF = L
+                     enddo
+                     if (NF == 0) then
+                        write(*,*) 'ADVCORE discrete_linear: no forward tracer for ', trim(advTracers(N)%tName)
+                        STATUS = 1
+                        VERIFY_(STATUS)
+                     endif
+                     ALLOCATE( adjQtraj(IM,JM,LM) )
+                     adjQtraj = TRACERS(:,:,:,NF)
+                     call adv_adj_discrete_adj(adjLam, adjMfxF, adjMfyF, adjCxF, adjCyF, &
+                                               adjPle0F, adjPle1F, 'linearized', q_traj=adjQtraj)
+                     DEALLOCATE( adjQtraj )
+                  else
+                     call adv_adj_discrete_adj(adjLam, adjMfxF, adjMfyF, adjCxF, adjCyF, &
+                                               adjPle0F, adjPle1F, trim(advAdjDiscFixer))
+                  endif
                   TRACERS(:,:,:,N) = adjLam
                enddo
                if (advAdjDiscCheck > 0) then
