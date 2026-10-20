@@ -67,6 +67,7 @@ module AdvCore_GridCompMod
 #ifdef ADJOINT
       ! discrete_linear: TAF-generated exact adjoint of the step (fvdycore/model/adjoint)
       use adv_adj_discrete_mod, only: adv_adj_discrete_init, adv_adj_discrete_adj, adv_adj_discrete_fwd
+      use adj_backend_mod, only: backend_set_halo_ad, backend_halo_test
 #endif
 
       USE FV_StateMod,     only: AdvCoreTracers => T_TRACERS
@@ -95,6 +96,7 @@ module AdvCore_GridCompMod
       logical                    :: advAdjDiscrete=.false.
       character(len=ESMF_MAXSTR) :: advAdjDiscFixer='none'
       integer                    :: advAdjDiscCheck=0
+      character(len=ESMF_MAXSTR) :: advAdjHaloAd='own'
       logical                    :: advAdjDiscReady=.false.
       ! ADV_ADJ_DISCRETE_CHECK 2: forward trajectory of the previous adjoint call (q at T+dt)
       REAL(FVPRC), ALLOCATABLE, SAVE :: adjQprev(:,:,:)
@@ -559,8 +561,18 @@ contains
       call MAPL_GetResource( MAPL, advAdjDiscCheck, 'ADV_ADJ_DISCRETE_CHECK:', &
                              default=0, RC=STATUS )
       _VERIFY(STATUS)
+      ! adjoint of the tracer halo update in the discrete adjoint: own (exact transpose of the
+      ! forward exchange, any layout) or fms (mpp_update_domains_ad: wrong for non-square
+      ! subdomains, e.g. 48 cores at C24; kept for comparison). CHECK 3: dot-product test of both
+      ! at the first adjoint step.
+      call MAPL_GetResource( MAPL, advAdjHaloAd, 'ADV_ADJ_HALO_AD:', default='own', RC=STATUS )
+      _VERIFY(STATUS)
+      if ( trim(advAdjHaloAd) /= 'own' .and. trim(advAdjHaloAd) /= 'fms' ) then
+         _ASSERT(.false., 'ADV_ADJ_HALO_AD must be own or fms')
+      endif
       if (MAPL_Am_I_Root()) write(*,*) 'ADVCORE adv_adj_method=', trim(advAdjMethod), &
-                                       ' discrete fixer=', trim(advAdjDiscFixer), ' check=', advAdjDiscCheck
+                                       ' discrete fixer=', trim(advAdjDiscFixer), ' check=', advAdjDiscCheck, &
+                                       ' halo adjoint=', trim(advAdjHaloAd)
 
       ! Weight that turns the adjoint variable into a mixing-ratio-like
       ! quantity around the reversed-wind advection (GCHP.rc):
@@ -1561,6 +1573,8 @@ contains
                   call adv_adj_discrete_init(FV_Atm(1)%gridstruct, FV_Atm(1)%flagstruct, FV_Atm(1)%bd, &
                                              FV_Atm(1)%domain, FV_Atm(1)%tile, FV_Atm(1)%npx,         &
                                              FV_Atm(1)%npy, FV_Atm(1)%npz, AK, BK, PTOP, abs(dt))
+                  call backend_set_halo_ad(trim(advAdjHaloAd))
+                  if (advAdjDiscCheck == 3) call backend_halo_test(FV_Atm(1)%npz)
                   advAdjDiscReady = .true.
                endif
                ! Inputs of the FORWARD step that this adjoint step reverses. GCHPctmEnv gives the
