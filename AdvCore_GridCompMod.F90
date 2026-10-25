@@ -97,6 +97,8 @@ module AdvCore_GridCompMod
       character(len=ESMF_MAXSTR) :: advAdjDiscFixer='none'
       integer                    :: advAdjDiscCheck=0
       character(len=ESMF_MAXSTR) :: advAdjHaloAd='own'
+      ! forward tracer whose pre-advection field the forward run exports as TRAJ_PREADV
+      character(len=ESMF_MAXSTR) :: advAdjTrajTracer='SPC_CO2'
       logical                    :: advAdjDiscReady=.false.
       ! ADV_ADJ_DISCRETE_CHECK 2: forward trajectory of the previous adjoint call (q at T+dt)
       REAL(FVPRC), ALLOCATABLE, SAVE :: adjQprev(:,:,:)
@@ -328,6 +330,21 @@ contains
           VLOCATION  = MAPL_VLocationEdge,               RC=STATUS  )
      VERIFY_(STATUS)
 
+#ifdef ADJOINT
+     ! Trajectory for the discrete_linear adjoint: the forward tracer ADV_ADJ_TRAJ_TRACER
+     ! right before the forward advection of the step (after the start-up rescaling).
+     ! GEOS-Chem imports it, so it is written to gcadj_import_checkpoint.<T> and restored
+     ! with it in the adjoint run.
+     call MAPL_AddExportSpec ( gc,                                  &
+          SHORT_NAME = 'TRAJ_PREADV',                               &
+          LONG_NAME  = 'tracer_before_advection_for_adjoint',       &
+          UNITS      = 'mol mol-1',                                 &
+          PRECISION  = ESMF_KIND_R8,                                &
+          DIMS       = MAPL_DimsHorzVert,                           &
+          VLOCATION  = MAPL_VLocationCenter,             RC=STATUS  )
+     VERIFY_(STATUS)
+#endif
+
      ! GCHP: The below three exports are the same as above  but REAL4
      ! This is a tempoary work-around for a bug in MAPL 2.55 preventing
      ! conversion from R8 to R4 in History (ewl, 5/27/25)
@@ -546,9 +563,14 @@ contains
       !   none       : factor 1 (the forward's s(q) is not differentiated)
       !   linearized : adjoint of q*s(q), with s(q) linearized about the forward q of the step.
       !                That q is the forward partner of the adjoint tracer (SPC_X for SPC_X_ADJ) in
-      !                TRADV: GEOS-Chem refreshes it from gcadj_internal_checkpoint.<T> before
-      !                AdvCore reverses step T -> T+dt, and that checkpoint holds q(T), the field
-      !                before the forward advection of the step.
+      !                TRADV. gcadj_internal_checkpoint.<T> holds the field AFTER the forward
+      !                advection of step T -> T+dt (it is written at the start of GEOS-Chem), and
+      !                the column adjoints leave q(T+dt) in the internal state. The forward run
+      !                therefore exports the field BEFORE advection as TRAJ_PREADV; GEOS-Chem
+      !                imports it (import checkpoint) and, in the adjoint run, copies it into the
+      !                forward partner at the end of its step, so this q is q(T). Only for the
+      !                tracer ADV_ADJ_TRAJ_TRACER (default SPC_CO2). The limiter decisions of the
+      !                discrete adjoint use the same q.
       call MAPL_GetResource( MAPL, advAdjDiscFixer, 'ADV_ADJ_DISCRETE_FIXER:', &
                              default='none', RC=STATUS )
       _VERIFY(STATUS)
@@ -566,6 +588,11 @@ contains
       ! subdomains, e.g. 48 cores at C24; kept for comparison). CHECK 3: dot-product test of both
       ! at the first adjoint step.
       call MAPL_GetResource( MAPL, advAdjHaloAd, 'ADV_ADJ_HALO_AD:', default='own', RC=STATUS )
+      _VERIFY(STATUS)
+      ! forward tracer exported as TRAJ_PREADV (forward run) and used as the trajectory of the
+      ! linearized discrete adjoint (adjoint run, restored by GEOS-Chem from the checkpoint)
+      call MAPL_GetResource( MAPL, advAdjTrajTracer, 'ADV_ADJ_TRAJ_TRACER:', default='SPC_CO2', &
+                             RC=STATUS )
       _VERIFY(STATUS)
       if ( trim(advAdjHaloAd) /= 'own' .and. trim(advAdjHaloAd) /= 'fms' ) then
          _ASSERT(.false., 'ADV_ADJ_HALO_AD must be own or fms')
@@ -781,6 +808,9 @@ contains
       REAL(REAL8), POINTER, DIMENSION(:,:,:)   :: ePLE       ! GCHP export to GEOS-Chem
       REAL(REAL8), POINTER, DIMENSION(:,:,:)   :: eDryPLE    ! GCHP dry export to GEOS-Chem
       REAL(REAL8), POINTER, DIMENSION(:,:,:)   :: ePLEadv    ! GCHP post-advection PLE
+#ifdef ADJOINT
+      REAL(REAL8), POINTER, DIMENSION(:,:,:)   :: eTRAJ => NULL() ! tracer before advection
+#endif
 
       ! GCHP R4 exports as temporary work-around for MAPL 2.55 bug
       REAL(REAL4), POINTER, DIMENSION(:,:,:)   :: ePLE_R4
@@ -1343,6 +1373,23 @@ contains
 
          endif
 
+#ifdef ADJOINT
+         ! Forward run: export ADV_ADJ_TRAJ_TRACER before the advection of this step (after the
+         ! start-up rescaling, in the units of the internal state) as TRAJ_PREADV. Not with
+         ! Use_Total_Air_Pressure: the adjoint run would convert it with its own SPHU0.
+         if ( .not. isAdjoint ) then
+            call MAPL_GetPointer( EXPORT, eTRAJ, 'TRAJ_PREADV', NotFoundOK=.TRUE., RC=STATUS )
+            VERIFY_(STATUS)
+            if ( associated(eTRAJ) ) then
+               eTRAJ = 0.0_REAL8
+               do N=1,NQ
+                  if ( trim(advTracers(N)%tName) == trim(advAdjTrajTracer) ) &
+                     eTRAJ = REAL(TRACERS(:,:,:,N), REAL8)
+               enddo
+            endif
+         endif
+#endif
+
          ! If using total air then set extra tracer to specific humidity and
          ! convert all other tracers from kg/kg dry to kg/kg total air
          if ( Use_Total_Air_Pressure > 0 ) then
@@ -1602,6 +1649,12 @@ contains
                      enddo
                      if (NF == 0) then
                         write(*,*) 'ADVCORE discrete_linear: no forward tracer for ', trim(advTracers(N)%tName)
+                        STATUS = 1
+                        VERIFY_(STATUS)
+                     endif
+                     if ( trim(advTracers(NF)%tName) /= trim(advAdjTrajTracer) ) then
+                        write(*,*) 'ADVCORE discrete_linear: trajectory is restored only for ', &
+                                   trim(advAdjTrajTracer), ' (ADV_ADJ_TRAJ_TRACER), not ', trim(advTracers(NF)%tName)
                         STATUS = 1
                         VERIFY_(STATUS)
                      endif
