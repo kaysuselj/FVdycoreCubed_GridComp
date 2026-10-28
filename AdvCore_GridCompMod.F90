@@ -90,11 +90,11 @@ module AdvCore_GridCompMod
 #ifdef ADJOINT
       character(len=ESMF_MAXSTR) :: modelPhase
       character(len=ESMF_MAXSTR) :: advAdjMethod='reverse_wind_pure'
-      character(len=ESMF_MAXSTR) :: advAdjWeight='dpadv'
+      character(len=ESMF_MAXSTR) :: advAdjWeight='airmass'
       integer                    :: advAdjRescale=1
       ! ADV_ADJ_METHOD: discrete_linear (fvdycore/model/adjoint, gchp/adv_adj_discrete.F90)
       logical                    :: advAdjDiscrete=.false.
-      character(len=ESMF_MAXSTR) :: advAdjDiscFixer='none'
+      character(len=ESMF_MAXSTR) :: advAdjDiscFixer='linearized'
       integer                    :: advAdjDiscCheck=0
       character(len=ESMF_MAXSTR) :: advAdjHaloAd='own'
       ! forward tracer whose pre-advection field the forward run exports as TRAJ_PREADV
@@ -571,8 +571,10 @@ contains
       !                forward partner at the end of its step, so this q is q(T). Only for the
       !                tracer ADV_ADJ_TRAJ_TRACER (default SPC_CO2). The limiter decisions of the
       !                discrete adjoint use the same q.
+      ! linearized (default): adjoint of the mass fixer linearized about the forward CO2 (DL is
+      ! then the adjoint of the model); none: fixer factor held at 1 (development only)
       call MAPL_GetResource( MAPL, advAdjDiscFixer, 'ADV_ADJ_DISCRETE_FIXER:', &
-                             default='none', RC=STATUS )
+                             default='linearized', RC=STATUS )
       _VERIFY(STATUS)
       if ( advAdjDiscrete .and. trim(advAdjDiscFixer) /= 'none' .and. &
            trim(advAdjDiscFixer) /= 'linearized' ) then
@@ -603,24 +605,24 @@ contains
 
       ! Weight that turns the adjoint variable into a mixing-ratio-like
       ! quantity around the reversed-wind advection (GCHP.rc):
-      !   dpadv (default): divide by the dry air mass at t+dt (pressure thickness x
+      !   airmass (default): dry air mass at t+dt before and at t after the advection
+      !                    (all validated RW results; the adjoint gains or loses
+      !                    div(mf)/dp of the cell every step)
+      !   dpadv          : divide by the dry air mass at t+dt (pressure thickness x
       !                    area); multiply by the air mass this reversed step leaves
       !                    in the cell before the vertical remapping (PLEAdv), plus
       !                    (mass at t - mass at t+dt) x the divided adjoint. This is the
       !                    transpose of the forward update q' = (q dp1 + div F) / dpA,
       !                    which uses the post-advection thickness dpA = dp1 + div(mf),
-      !                    not the met thickness
-      !   airmass        : dry air mass at t+dt before and at t after the advection
-      !                    (behaviour until 2026-10-14; the adjoint gains or loses
-      !                    div(mf)/dp of the cell every step)
-      !   airden         : the air density import on both sides (earlier behaviour)
+      !                    not the met thickness (development option, not validated)
+      ! (The air density is used only with Use_Total_Air_Pressure > 0; the former option
+      ! airden, density on both sides with dry pressure, is removed.)
       call MAPL_GetResource( MAPL, advAdjWeight, 'ADV_ADJ_WEIGHT:', &
-                             default='dpadv', RC=STATUS )
+                             default='airmass', RC=STATUS )
       _VERIFY(STATUS)
       if ( trim(advAdjWeight) /= 'dpadv'   .and. &
-           trim(advAdjWeight) /= 'airmass' .and. &
-           trim(advAdjWeight) /= 'airden' ) then
-         _ASSERT(.false., 'ADV_ADJ_WEIGHT must be dpadv, airmass or airden')
+           trim(advAdjWeight) /= 'airmass' ) then
+         _ASSERT(.false., 'ADV_ADJ_WEIGHT must be airmass (default) or dpadv')
       endif
       ! 1 (default): restore the global sum of the adjoint after the advection
       call MAPL_GetResource( MAPL, advAdjRescale, 'ADV_ADJ_RESCALE:', &
